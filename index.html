@@ -1,9 +1,12 @@
-<!doctype html>
-<html lang="en">
+﻿<!doctype html>
+<html lang="en-GB">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <meta name="theme-color" content="#0b0f17" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1.0, viewport-fit=cover"
+    />
+    <meta name="theme-color" content="#0d1518" id="appThemeColor" />
     <base href="./" />
     <title>Tajiri POS</title>
     <script>
@@ -209,7 +212,7 @@
                   ⚙ Settings
                 </button>
                 <button class="more-menu-item" data-view="Help Center">
-                  ? Help Center
+                  ? Help Centre
                 </button>
                 <div class="more-menu-separator" role="separator"></div>
                 <button class="more-menu-item" data-view="Receipts">
@@ -393,7 +396,7 @@
                 <div class="quick-heading">
                   <h2>Quick add</h2>
                   <button class="text-button" id="viewCatalog">
-                    View catalog →
+                    View catalogue →
                   </button>
                 </div>
                 <div class="product-grid" id="productGrid"></div>
@@ -480,7 +483,7 @@
                   id="adminCreateAccountButton"
                   type="button"
                 >
-                  ＋ Sign up cashier
+                  + Create staff account
                 </button>
               </div>
               <section
@@ -612,6 +615,31 @@
                   ＋ Add product
                 </button>
               </div>
+              <section class="inventory-alerts" aria-labelledby="catalogImportHeading">
+                <div class="inventory-alerts-heading">
+                  <div>
+                    <p class="eyebrow">BULK PRODUCT SETUP</p>
+                    <h3 id="catalogImportHeading">Import product catalogue</h3>
+                  </div>
+                  <input
+                    id="productImportFile"
+                    type="file"
+                    accept=".csv,text/csv"
+                    hidden
+                  />
+                  <button class="secondary-button" id="chooseProductImportButton" type="button">
+                    Choose CSV file
+                  </button>
+                  <button class="primary-button" id="confirmProductImportButton" type="button" disabled>
+                    Import products
+                  </button>
+                </div>
+                <p class="modal-note" id="productImportStatus" role="status" aria-live="polite">
+                  CSV columns: SKU, ProductName, Category, BuyPriceKES, SellPriceKES, StockQty and ReorderLevel.
+                  Products with matching SKUs will be updated; other products and all sales will be kept.
+                  Imported stock applies to the selected branch.
+                </p>
+              </section>
               <div class="panel-grid">
                 <div class="panel-card">
                   <span>Stock items</span><strong id="stockCard">0</strong>
@@ -711,7 +739,7 @@
                 type="button"
                 hidden
               >
-                ＋ Sign up cashier
+                + Create staff account
               </button>
             </section>
 
@@ -924,7 +952,7 @@
             <section class="view-panel" data-view="Help Center" hidden>
               <div class="panel-header">
                 <p class="eyebrow">HELP & GUIDANCE</p>
-                <h2>Help Center</h2>
+                <h2>Help Centre</h2>
                 <p class="modal-note">
                   Quick guidance for common point-of-sale tasks.
                 </p>
@@ -979,10 +1007,7 @@
                     <label class="setting-control"
                       ><span>Language & region</span
                       ><select id="languageSelect">
-                        <option value="en">English · Kenya</option>
-                        <option value="sw" disabled>
-                          Kiswahili · Kenya (not available yet)
-                        </option>
+                        <option value="en-GB">English (UK) · Kenya</option>
                       </select></label
                     >
                     <label class="setting-control"
@@ -993,11 +1018,11 @@
                       </select></label
                     >
                     <label class="setting-control"
-                      ><span>Background color</span
+                      ><span>Background colour</span
                       ><input
                         id="backgroundColorInput"
                         type="color"
-                        value="#1e1e1e"
+                        value="#121820"
                     /></label>
                     <label class="setting-toggle"
                       ><span
@@ -1533,7 +1558,7 @@
                   <span class="operation-icon">⟳</span>
                   <div>
                     <h3>Refresh</h3>
-                    <p>Clear the search and reload the product catalog.</p>
+                    <p>Clear the search and reload the product catalogue.</p>
                   </div>
                   <button class="row-action" id="refreshButton">Refresh</button>
                 </article>
@@ -1979,14 +2004,15 @@
 
             <form class="auth-form active" id="loginForm" novalidate>
               <h2>Welcome back</h2>
-              <p class="auth-sub">Sign in with your account email to open your workspace.</p>
+              <p class="auth-sub">Sign in with your phone number and password.</p>
               <label
-                >Email
+                >Kenyan phone number
                 <input
                   id="loginIdentity"
-                  type="email"
+                  type="tel"
+                  inputmode="tel"
                   autocomplete="username"
-                  placeholder="you@example.com"
+                  placeholder="0712345678 or +254712345678"
                   required
                 />
               </label>
@@ -2023,7 +2049,7 @@
 
             <form class="auth-form" id="signupForm" novalidate hidden>
               <h2>Start your free shop trial</h2>
-              <p class="auth-sub">Create your shop workspace and get 14 days free.</p>
+              <p class="auth-sub">Create your shop workspace and get 14 days free. Verify your phone once by SMS.</p>
               <label
                 >Shop name
                 <input
@@ -2043,12 +2069,22 @@
                   required
               /></label>
               <label
-                >Email
+                >Contact email
                 <input
                   id="signupEmail"
                   type="email"
                   autocomplete="email"
                   placeholder="amina@example.com"
+                  required
+              /></label>
+              <label
+                >Kenyan phone number
+                <input
+                  id="signupPhone"
+                  type="tel"
+                  inputmode="tel"
+                  autocomplete="tel"
+                  placeholder="0712345678 or +254712345678"
                   required
               /></label>
               <label class="password-field" for="signupPassword"
@@ -2115,6 +2151,38 @@
               </p>
               <p class="auth-error" id="signupError" hidden></p>
             </form>
+
+            <form class="auth-form" id="signupVerifyForm" novalidate hidden>
+              <h2>Verify your phone</h2>
+              <p class="auth-sub">
+                Enter the 6-digit code we sent to
+                <strong id="signupVerifyPhone"></strong>. You will only need to
+                verify this number once.
+              </p>
+              <label
+                >SMS verification code
+                <input
+                  id="signupVerificationCode"
+                  type="text"
+                  inputmode="numeric"
+                  autocomplete="one-time-code"
+                  pattern="[0-9]{6}"
+                  maxlength="6"
+                  placeholder="123456"
+                  required
+                />
+              </label>
+              <button type="submit" class="auth-submit" id="signupVerifySubmit">
+                Verify phone
+              </button>
+              <button type="button" class="auth-link" id="signupVerifyResend">
+                Resend code
+              </button>
+              <button type="button" class="auth-link" id="signupVerifyBack">
+                Back to sign in
+              </button>
+              <p class="auth-error" id="signupVerifyError" role="alert" hidden></p>
+            </form>
           </div>
         </div>
       </div>
@@ -2139,17 +2207,18 @@
           </div>
           <div class="modal-body">
             <p class="auth-sub">
-              Enter the email address on your account. We’ll send a secure
-              password reset link.
+              Enter the phone number on your account. We’ll send a password
+              reset code by SMS.
             </p>
             <form class="auth-form active" id="passwordResetForm" novalidate>
               <label
-                >Email
+                >Kenyan phone number
                 <input
                   id="passwordResetIdentity"
-                  type="email"
+                  type="tel"
+                  inputmode="tel"
                   autocomplete="username"
-                  placeholder="you@example.com"
+                  placeholder="0712345678 or +254712345678"
                   required
                 />
               </label>
@@ -2158,7 +2227,7 @@
                 class="auth-submit"
                 id="passwordResetSubmit"
               >
-                Send reset link
+                Send reset code
               </button>
               <p
                 class="auth-error"
@@ -2324,8 +2393,8 @@
       // Supabase project settings. Replace the placeholders with your project
       // URL and anon key from Supabase Dashboard → Settings → API.
       window.TAJIRI_SUPABASE_CONFIG = {
-        url: "https://yqhtrqeboqkecvayddom.supabase.co",
-        anonKey: "sb_publishable_FTSS5n2cudiK6D6PclJyLg_gFRZ_8xN",
+        url: "https://stwjfbylnbajjdrkxlzb.supabase.co",
+        anonKey: "sb_publishable_eQ97c7njdvpnzsRwZoGDRA_XITgNUG7",
       };
       window.TAJIRI_SUPABASE_URL = window.TAJIRI_SUPABASE_CONFIG.url;
       window.TAJIRI_SUPABASE_ANON_KEY = window.TAJIRI_SUPABASE_CONFIG.anonKey;
@@ -2485,7 +2554,7 @@
                   },
                 );
               });
-            if (firebaseUser && firebaseUser.emailVerified) {
+            if (firebaseUser) {
               const userSnapshot = await window.firebaseDb
                 .collection("users")
                 .doc(firebaseUser.uid)
@@ -2494,7 +2563,7 @@
                 ? { ...userSnapshot.data(), uid: firebaseUser.uid }
                 : null;
               let verifiedProfile = profile;
-              if (!verifiedProfile && firebaseUser.emailVerified && roleShell === "admin") {
+              if (!verifiedProfile && roleShell === "admin") {
                 let pendingProfile = null;
                 try {
                   pendingProfile = JSON.parse(
@@ -2515,7 +2584,7 @@
                 (verifiedProfile.role === "admin" || verifiedProfile.role === "cashier")
               ) {
                 session = String(
-                  verifiedProfile.username || verifiedProfile.email || firebaseUser.email || "",
+                  verifiedProfile.username || verifiedProfile.phone || firebaseUser.phone || "",
                 )
                   .trim()
                   .toLowerCase();

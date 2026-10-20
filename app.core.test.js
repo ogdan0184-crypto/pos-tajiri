@@ -33,6 +33,15 @@ const loadProductsFn = source.slice(
   source.indexOf("function loadProducts"),
   source.indexOf("let users = []"),
 );
+const productCsvParserFn = sliceBetween(
+  "function parseProductCsv",
+  "function loadProducts",
+);
+const syncCurrentBranchStockFn = sliceBetween(
+  "function syncCurrentBranchStock",
+  "function activateStoreStock",
+);
+const saveStateFn = sliceBetween("function saveState()", "function queueCloudStateSave");
 const moneyFn = source.slice(
   source.indexOf("const money ="),
   source.indexOf("function showToast"),
@@ -80,9 +89,24 @@ const SANDBOX_GLOBALS = {
       hidden: false,
       innerHTML: "",
     }),
-    createElement: () => ({ click() {}, remove() {} }),
+    createElement: () => ({ click() {}, remove() {}     }),
     body: { append() {} },
   },
+  localStorage: { setItem() {} },
+  users: [],
+  customers: [],
+  salesLog: [],
+  expenses: [],
+  purchaseOrders: [],
+  pendingMpesa: [],
+  loyaltyBalance: 0,
+  cashBook: [],
+  shifts: [],
+  branchStock: {},
+  stockTransfers: [],
+  deliveries: [],
+  offlineMode: false,
+  showToast() {},
   window: {
     location: { origin: "http://127.0.0.1:3000", protocol: "http:" },
     setTimeout: (fn) => setTimeout(fn, 0),
@@ -133,13 +157,14 @@ beforeAll(() => {
   ctx = createContext();
   evalIn(
     ctx,
-    `${loadProductsFn}\nconst products = loadProducts();\n${moneyFn}\n${csvAndModalFn}\n${cartMathFn}\n${phoneFn}\n${escapeAndLowStockFn}\n${barcodeFn}\n${tillSummaryFn}\n${cashierIdFn}\n
+    `${productCsvParserFn}\n${loadProductsFn}\nconst products = loadProducts();\n${syncCurrentBranchStockFn}\n${saveStateFn}\n${moneyFn}\n${csvAndModalFn}\n${cartMathFn}\n${phoneFn}\n${escapeAndLowStockFn}\n${barcodeFn}\n${tillSummaryFn}\n${cashierIdFn}\n
     this.__api = {
       money, toCsv, escapeHtml, getEffectivePrice, getProductPrice,
+      parseProductCsv,
       currentSubtotal, currentTaxable, currentVat, currentServiceCharge, currentTotal,
       addProduct, normalizeKenyanPhone, receiptLogoMarkup, getReceiptFontSize,
       getLowStockThreshold, getLowStockProducts, code39Svg,
-      getTodayTillSummary, getCashierId,
+      getTodayTillSummary, getCashierId, saveState,
     };`,
   );
   ctx.__api.settings = ctx.settings;
@@ -156,6 +181,90 @@ beforeAll(() => {
 const api = () => ctx.__api;
 
 /* ---------- money ---------- */
+describe("product CSV import", () => {
+  it("parses the shop catalogue columns and preserves prices, stock and reorder levels", () => {
+    const imported = api().parseProductCsv(
+      "\uFEFFSKU,ProductName,Category,BuyPriceKES,SellPriceKES,StockQty,ReorderLevel\r\n" +
+        "GS0001,Maize Flour,Staples,457.17,510.68,124,44\r\n",
+    );
+    expect(imported).toHaveLength(1);
+    expect(imported[0]).toMatchObject({
+      code: "GS0001",
+      name: "Maize Flour",
+      category: "Staples",
+      cost: 457.17,
+      price: 510.68,
+      stock: 124,
+      reorderLevel: 44,
+      aliases: ["Maize Flour", "GS0001", "SKU GS0001"],
+    });
+  });
+
+  it("supports quoted commas and escaped quotes in product names", () => {
+    const imported = api().parseProductCsv(
+      "SKU,ProductName,Category,BuyPriceKES,SellPriceKES,StockQty,ReorderLevel\n" +
+        'GS0001,"Flour, Premium ""Grade A""",Staples,12.5,15,4,5\n',
+    );
+    expect(imported[0].name).toBe('Flour, Premium "Grade A"');
+  });
+
+  it.each([
+    [
+      "duplicate SKUs",
+      "SKU,ProductName,Category,BuyPriceKES,SellPriceKES,StockQty,ReorderLevel\nGS0001,Flour,Staples,2,3,4,5\nGS0001,Rice,Staples,2,3,4,5",
+      /repeats SKU GS0001/,
+    ],
+    [
+      "missing required columns",
+      "SKU,ProductName,Category\nGS0001,Flour,Staples",
+      /Missing required CSV columns/,
+    ],
+    [
+      "non-numeric values",
+      "SKU,ProductName,Category,BuyPriceKES,SellPriceKES,StockQty,ReorderLevel\nGS0001,Flour,Staples,free,3,4,5",
+      /invalid buy price/,
+    ],
+    [
+      "fractional stock quantities",
+      "SKU,ProductName,Category,BuyPriceKES,SellPriceKES,StockQty,ReorderLevel\nGS0001,Flour,Staples,2,3,4.5,5",
+      /whole numbers/,
+    ],
+    [
+      "unclosed quoted fields",
+      'SKU,ProductName,Category,BuyPriceKES,SellPriceKES,StockQty,ReorderLevel\nGS0001,"Flour,Staples,2,3,4,5',
+      /unclosed quoted field/,
+    ],
+  ])("rejects %s", (_name, csv, error) => {
+    expect(() => api().parseProductCsv(csv)).toThrow(error);
+  });
+});
+
+describe("POS state persistence", () => {
+  it("saves when IndexedDB exposes the offline-cache API", () => {
+    const calls = [];
+    ctx.window.TajiriIdb = Object.fromEntries(
+      ["cacheCatalog", "saveSales", "saveCustomers", "saveStaff", "saveSettings"].map(
+        (method) => [
+          method,
+          () => {
+            calls.push(method);
+            return Promise.resolve();
+          },
+        ],
+      ),
+    );
+
+    expect(api().saveState()).toBe(true);
+    expect(calls).toEqual([
+      "cacheCatalog",
+      "saveSales",
+      "saveCustomers",
+      "saveStaff",
+      "saveSettings",
+    ]);
+  });
+});
+
 describe("money", () => {
   it("formats a number with two decimals at the default KES rate", () => {
     expect(api().money(10)).toBe("10.00");

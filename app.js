@@ -1,6 +1,7 @@
-const products = loadProducts();
+﻿const products = loadProducts();
 
 function normalizeSearchText(value = "") {
+  if (value == null) return "";
   return String(value)
     .toLowerCase()
     .normalize("NFD")
@@ -15,8 +16,8 @@ function normalizeIdentity(value = "") {
     .trim()
     .normalize("NFKC")
     .replace(/\u00a0/g, " ")
-    .replace(/[\u2022\u2023\u25e6]/g, "·")
-    .replace(/\s*·\s*/g, " · ")
+    .replace(/[\u2022\u2023\u25e6]/g, "\u00b7")
+    .replace(/\s+/g, " ")
     .toLowerCase();
 }
 
@@ -149,6 +150,135 @@ function getSearchSuggestions(query = "") {
     );
 
   return scored.slice(0, 6).map((entry) => entry.product);
+}
+
+function parseProductCsv(csvText) {
+  const rows = [];
+  let row = [];
+  let field = "";
+  let inQuotes = false;
+  const text = String(csvText || "").replace(/^\uFEFF/, "");
+
+  for (let index = 0; index < text.length; index += 1) {
+    const character = text[index];
+    if (inQuotes) {
+      if (character === '"' && text[index + 1] === '"') {
+        field += '"';
+        index += 1;
+      } else if (character === '"') {
+        inQuotes = false;
+      } else {
+        field += character;
+      }
+      continue;
+    }
+    if (character === ",") {
+      row.push(field);
+      field = "";
+    } else if (character === "\r" || character === "\n") {
+      row.push(field);
+      if (row.some((value) => value.trim())) rows.push(row);
+      row = [];
+      field = "";
+      if (character === "\r" && text[index + 1] === "\n") index += 1;
+    } else if (character === '"') {
+      if (field) throw new Error(`Unexpected quote near row ${rows.length + 1}.`);
+      inQuotes = true;
+    } else {
+      field += character;
+    }
+  }
+
+  if (inQuotes) throw new Error("The CSV has an unclosed quoted field.");
+  row.push(field);
+  if (row.some((value) => value.trim())) rows.push(row);
+  if (rows.length < 2) throw new Error("The CSV has no product rows.");
+
+  const headers = rows[0].map((header) => header.trim().toLowerCase());
+  const requiredHeaders = [
+    "sku",
+    "productname",
+    "category",
+    "buypricekes",
+    "sellpricekes",
+    "stockqty",
+    "reorderlevel",
+  ];
+  const headerIndexes = new Map();
+  headers.forEach((header, index) => {
+    if (!header) throw new Error("The CSV contains an empty column heading.");
+    if (headerIndexes.has(header))
+      throw new Error(`The CSV has a duplicate column heading: ${header}.`);
+    headerIndexes.set(header, index);
+  });
+  const missingHeaders = requiredHeaders.filter(
+    (header) => !headerIndexes.has(header),
+  );
+  if (missingHeaders.length) {
+    throw new Error(
+      `Missing required CSV columns: ${missingHeaders.join(", ")}.`,
+    );
+  }
+
+  const seenSkus = new Set();
+  const importedProducts = [];
+  rows.slice(1).forEach((values, rowIndex) => {
+    const rowNumber = rowIndex + 2;
+    if (values.length !== headers.length) {
+      throw new Error(`CSV row ${rowNumber} has the wrong number of columns.`);
+    }
+    const value = (header) => values[headerIndexes.get(header)].trim();
+    const code = value("sku");
+    const name = value("productname");
+    const category = value("category");
+    if (!/^[a-z0-9._-]{1,80}$/i.test(code))
+      throw new Error(`CSV row ${rowNumber} has an invalid SKU.`);
+    if (!name || name.length > 160)
+      throw new Error(`CSV row ${rowNumber} has an invalid product name.`);
+    if (!category || category.length > 100)
+      throw new Error(`CSV row ${rowNumber} has an invalid category.`);
+    const skuKey = code.toUpperCase();
+    if (seenSkus.has(skuKey))
+      throw new Error(`CSV row ${rowNumber} repeats SKU ${code}.`);
+    seenSkus.add(skuKey);
+
+    const parseAmount = (header, label) => {
+      const raw = value(header);
+      if (!/^\d+(?:\.\d+)?$/.test(raw)) {
+        throw new Error(`CSV row ${rowNumber} has an invalid ${label}.`);
+      }
+      const amount = Number(raw);
+      if (!Number.isFinite(amount))
+        throw new Error(`CSV row ${rowNumber} has an invalid ${label}.`);
+      return amount;
+    };
+    const cost = parseAmount("buypricekes", "buy price");
+    const price = parseAmount("sellpricekes", "selling price");
+    const stock = parseAmount("stockqty", "stock quantity");
+    const reorderLevel = parseAmount("reorderlevel", "reorder level");
+    if (price <= 0)
+      throw new Error(`CSV row ${rowNumber} selling price must be greater than zero.`);
+    if (!Number.isSafeInteger(stock) || !Number.isSafeInteger(reorderLevel)) {
+      throw new Error(
+        `CSV row ${rowNumber} stock and reorder level must be whole numbers.`,
+      );
+    }
+    importedProducts.push({
+      code,
+      name,
+      category,
+      cost,
+      price,
+      stock,
+      reorderLevel,
+      aliases: [...new Set([name, code, `SKU ${code}`])],
+      icon: "•",
+    });
+  });
+  if (importedProducts.length > 10000) {
+    throw new Error("A single CSV import cannot contain more than 10,000 products.");
+  }
+  return importedProducts;
 }
 
 function loadProducts() {
@@ -308,9 +438,9 @@ const settings = {
   taxRate: 0,
   serviceCharge: 0,
   currency: "KES",
-  language: "en",
+  language: "en-GB",
   theme: "dark",
-  backgroundColor: "#1e1e1e",
+  backgroundColor: "#121820",
   lowStockThreshold: DEFAULT_LOW_STOCK_LEVEL,
   lowStockAlerts: true,
   salesReportAlerts: true,
@@ -846,7 +976,7 @@ document.querySelector("#viewCatalog").addEventListener("click", () => {
   search.value = "";
   renderProducts();
   search.focus();
-  showToast("Catalog is ready to search");
+  showToast("Product catalogue is ready to search");
 });
 document
   .querySelector("#deliveryButton")
@@ -892,7 +1022,7 @@ document.querySelector("#holdButton").addEventListener("click", () => {
 document.querySelector("#refreshButton").addEventListener("click", () => {
   search.value = "";
   renderProducts();
-  showToast("Catalog refreshed");
+  showToast("Product catalogue refreshed");
 });
 
 const appLoader = document.getElementById("appLoader");
@@ -1188,7 +1318,7 @@ modalActions.addEventListener("click", async (event) => {
       "How was your experience?",
       `
       <p class="modal-note">Rate this sale from 1 to 5 stars to help us improve.</p>
-      <div class="rating-row">${[1, 2, 3, 4, 5].map((n) => `<button type="button" class="rating-star" data-rating="${n}">â˜…</button>`).join("")}</div>`,
+      <div class="rating-row">${[1, 2, 3, 4, 5].map((n) => `<button type="button" class="rating-star" data-rating="${n}">★</button>`).join("")}</div>`,
       `<button type="button" class="modal-primary" data-modal-action="cancel">Close</button>`,
     );
     return;
@@ -1503,9 +1633,9 @@ modalActions.addEventListener("click", async (event) => {
       taxRate: 0,
       serviceCharge: 0,
       currency: "KES",
-      language: "en",
+      language: "en-GB",
       theme: "dark",
-      backgroundColor: "#1e1e1e",
+      backgroundColor: "#121820",
       lowStockThreshold: DEFAULT_LOW_STOCK_LEVEL,
       lowStockAlerts: true,
       salesReportAlerts: true,
@@ -1537,9 +1667,9 @@ modalActions.addEventListener("click", async (event) => {
     document.querySelector("#taxRateInput").value = "0";
     document.querySelector("#serviceChargeInput").value = "0";
     document.querySelector("#currencySelect").value = "KES";
-    document.querySelector("#languageSelect").value = "en";
+    document.querySelector("#languageSelect").value = "en-GB";
     document.querySelector("#themeSelect").value = "dark";
-    document.querySelector("#backgroundColorInput").value = "#1e1e1e";
+    document.querySelector("#backgroundColorInput").value = "#121820";
     document.querySelector("#discountRuleSelect").value = "percentage";
     document.querySelector("#receiptFooterInput").value =
       settings.receiptFooter;
@@ -2145,7 +2275,7 @@ function completeSaleRecord(
     shiftId: activeShift?.id || null,
     tillNumber: activeShift?.tillNumber || null,
     store: settings.storeName,
-    time: new Date().toLocaleTimeString([], {
+    time: new Date().toLocaleTimeString("en-GB", {
       hour: "2-digit",
       minute: "2-digit",
     }),
@@ -2285,7 +2415,7 @@ function openReceipt(sale, earned) {
       <div class="receipt-summary"><div><span>Subtotal</span><b>${money(sale.subtotal)}</b></div><div><span>Discount</span><b>-${money(sale.discount)}</b></div><div><span>VAT</span><b>${money(sale.tax)}</b></div><div><span>Service charge</span><b>${money(sale.serviceCharge)}</b></div><div class="receipt-total-line"><span>Total</span><b>${money(sale.total)}</b></div></div>
       <div class="receipt-payment"><span>Payment Method: ${sale.method}</span><span>Paid Amount: ${money(sale.amountPaid)}</span><span>Change: ${money(sale.change)}</span><span>Transaction ID: ${sale.method === "M-Pesa" ? sale.transactionId : sale.id}</span></div>
       <div class="qr-placeholder" aria-label="Transaction barcode">${sale.id}</div>
-      <div class="receipt-footer"><strong>${escapeHtml(settings.receiptFooter)}</strong><span>You earned ${earned} loyalty points today.</span><span>${escapeHtml(settings.returnPolicy)}</span><span>Karibu tena ${escapeHtml(settings.receiptShopName)}!</span><div class="receipt-barcode" aria-hidden="true"></div></div>
+      <div class="receipt-footer"><strong>${escapeHtml(settings.receiptFooter)}</strong><span>You earned ${earned} loyalty points today.</span><span>${escapeHtml(settings.returnPolicy)}</span><span>Thank you for shopping with us at ${escapeHtml(settings.receiptShopName)}!</span><div class="receipt-barcode" aria-hidden="true"></div></div>
     </div>`,
     `<button type="button" class="modal-secondary" data-receipt-action="print">Print</button><button type="button" class="modal-secondary" data-receipt-action="whatsapp">WhatsApp</button><button type="button" class="modal-primary" data-receipt-action="feedback">Done</button>`,
   );
@@ -2321,7 +2451,7 @@ function renderReceiptPanel(sale) {
     <div class="receipt-total"><span>Total</span><b>${money(sale.total)}</b></div>`
         : "<span>Complete a sale to see transaction details</span>"
     }
-    <span>${escapeHtml(settings.receiptFooter)}</span>${sale ? `<span>You earned ${Math.floor(sale.total / 100)} loyalty points today.</span>` : ""}<span>${escapeHtml(settings.returnPolicy)}</span><span>Karibu tena ${escapeHtml(settings.receiptShopName)}!</span>`;
+    <span>${escapeHtml(settings.receiptFooter)}</span>${sale ? `<span>You earned ${Math.floor(sale.total / 100)} loyalty points today.</span>` : ""}<span>${escapeHtml(settings.returnPolicy)}</span><span>Thank you for shopping with us at ${escapeHtml(settings.receiptShopName)}!</span>`;
 }
 
 function escapeHtml(value) {
@@ -2356,7 +2486,10 @@ function getReceiptFontSize() {
 
 /* ---------- Panels: inventory, customers, staff, reports, expenses, suppliers ---------- */
 
-function getLowStockThreshold() {
+function getLowStockThreshold(product = null) {
+  const productThreshold = Number(product?.reorderLevel);
+  if (Number.isSafeInteger(productThreshold) && productThreshold >= 0)
+    return productThreshold;
   const threshold = Number(settings.lowStockThreshold);
   return Number.isSafeInteger(threshold) && threshold >= 0
     ? threshold
@@ -2364,9 +2497,11 @@ function getLowStockThreshold() {
 }
 
 function getLowStockProducts() {
-  const threshold = getLowStockThreshold();
   return products
-    .filter((product) => Number(product.stock) <= threshold)
+    .filter(
+      (product) =>
+        Number(product.stock) <= getLowStockThreshold(product),
+    )
     .sort(
       (a, b) =>
         Number(a.stock) - Number(b.stock) || a.name.localeCompare(b.name),
@@ -2389,7 +2524,7 @@ function renderInventoryPanel() {
         (p) => `
       <div class="inventory-row">
         <strong>${escapeHtml(p.name)}</strong><span>${escapeHtml(p.category || "—")}</span>
-        <span class="${Number(p.stock) <= getLowStockThreshold() ? "stock-low" : ""}">${Number(p.stock) || 0}</span>
+        <span class="${Number(p.stock) <= getLowStockThreshold(p) ? "stock-low" : ""}">${Number(p.stock) || 0}</span>
         <span>${escapeHtml(settings.currency)} ${money(p.price)}</span>
         <div class="inventory-actions">
           <button class="row-action" data-product-action="print-label" data-id="${p.id}">Label</button>
@@ -2419,7 +2554,7 @@ function renderInventoryPanel() {
           .map(
             (product) => `
         <div class="panel-row inventory-alert-row">
-          <span><strong>${escapeHtml(product.name)}</strong><small>${escapeHtml(product.code || "No SKU")} · ${Number(product.stock) || 0} left (alert at ${getLowStockThreshold()})</small></span>
+          <span><strong>${escapeHtml(product.name)}</strong><small>${escapeHtml(product.code || "No SKU")} · ${Number(product.stock) || 0} left (alert at ${getLowStockThreshold(product)})</small></span>
           <button class="row-action inventory-restock-button" type="button" data-restock-id="${product.id}">＋ Restock</button>
         </div>`,
           )
@@ -2442,7 +2577,10 @@ function createReorderSuggestions() {
         !["Received", "Cancelled"].includes(order.status),
     );
     if (existing) return;
-    const targetStock = Math.max(20, getLowStockThreshold() * 3);
+    const targetStock = Math.max(
+      20,
+      getLowStockThreshold(product) * 3,
+    );
     const supplier =
       product.supplier ||
       suppliers.find((entry) => entry.supplies === product.name)?.name ||
@@ -2526,7 +2664,7 @@ function renderStockTransfersPanel() {
   if (!list) return;
   list.innerHTML = stockTransfers.length
     ? stockTransfers.slice().reverse().map((transfer) =>
-        `<div class="panel-row"><span>${escapeHtml(transfer.product)} · ${transfer.quantity} units · ${escapeHtml(transfer.from)} → ${escapeHtml(transfer.to)}</span><strong>${new Date(transfer.createdAt).toLocaleDateString()}</strong></div>`,
+        `<div class="panel-row"><span>${escapeHtml(transfer.product)} · ${transfer.quantity} units · ${escapeHtml(transfer.from)} → ${escapeHtml(transfer.to)}</span><strong>${new Date(transfer.createdAt).toLocaleDateString("en-GB")}</strong></div>`,
       ).join("")
     : `<div class="panel-row"><span>No stock transfers recorded yet</span><strong>—</strong></div>`;
 }
@@ -2782,7 +2920,7 @@ function renderCashierDashboard() {
   const button = document.querySelector("#cashierShiftButton");
   status.textContent = shift ? "Shift open" : "No shift open";
   details.textContent = shift
-    ? `Till ${shift.tillNumber || "unassigned"} · Started ${new Date(shift.openedAt).toLocaleString()} · Opening float ${settings.currency} ${money(shift.openingFloat)}`
+    ? `Till ${shift.tillNumber || "unassigned"} · Started ${new Date(shift.openedAt).toLocaleString("en-GB")} · Opening float ${settings.currency} ${money(shift.openingFloat)}`
     : "Open a shift before taking sales.";
   button.textContent = shift ? "Close shift" : "Open shift";
   button.dataset.shiftAction = shift ? "close" : "open";
@@ -3555,18 +3693,6 @@ function saveState() {
       : "tajiri-pos-accounts";
     localStorage.setItem(stateKey, JSON.stringify(state));
     localStorage.setItem(accountsKey, JSON.stringify(users));
-    // Durable mirror in IndexedDB: survives storage resets and holds the
-    // offline transaction queue even when localStorage quota is exceeded.
-    if (window.TajiriIdb) {
-      Promise.all([
-        window.TajiriIdb.putState(state),
-        window.TajiriIdb.replaceProducts(products),
-        window.TajiriIdb.replaceCustomers(customers),
-        window.TajiriIdb.replaceSales(salesLog),
-      ]).catch((error) =>
-        console.warn("Could not mirror POS data into IndexedDB:", error),
-      );
-    }
     if (tenantId && window.tajiriSupabase) {
       const shopData = { ...state };
       delete shopData.users;
@@ -3834,7 +3960,7 @@ function loadState() {
       .toFixed(1)
       .replace(/\.0$/, "");
     document.querySelector("#currencySelect").value = settings.currency;
-    document.querySelector("#languageSelect").value = settings.language;
+    document.querySelector("#languageSelect").value = "en-GB";
     document.querySelector("#themeSelect").value = settings.theme;
     document.querySelector("#backgroundColorInput").value =
       settings.backgroundColor;
@@ -4046,11 +4172,17 @@ function businessBackupError(backup) {
 }
 
 function applySettingsAppearance() {
+  settings.language = "en-GB";
   document.body.dataset.theme = settings.theme || "dark";
+  document.documentElement.lang = "en-GB";
   document.body.style.setProperty(
     "--app-background",
-    settings.backgroundColor || "#1e1e1e",
+    settings.backgroundColor || "#121820",
   );
+  const themeColour = document.querySelector("#appThemeColor");
+  if (themeColour) {
+    themeColour.content = settings.theme === "light" ? "#f1f6f4" : "#0d1518";
+  }
 
   const brandName =
     settings.receiptShopName || settings.storeName || "Tajiri POS";
@@ -4095,6 +4227,133 @@ window.addEventListener("offline", () => renderOperationsPanel());
 document
   .querySelector("#inventorySearch")
   ?.addEventListener("input", renderInventoryPanel);
+
+let pendingProductImport = null;
+const productImportFile = document.querySelector("#productImportFile");
+const chooseProductImportButton = document.querySelector(
+  "#chooseProductImportButton",
+);
+const confirmProductImportButton = document.querySelector(
+  "#confirmProductImportButton",
+);
+const productImportStatus = document.querySelector("#productImportStatus");
+
+chooseProductImportButton?.addEventListener("click", () => {
+  if (currentUser?.role !== "admin")
+    return showToast("Admin permission required to import products");
+  productImportFile?.click();
+});
+
+productImportFile?.addEventListener("change", async () => {
+  pendingProductImport = null;
+  if (confirmProductImportButton)
+    confirmProductImportButton.disabled = true;
+  const file = productImportFile.files?.[0];
+  if (!file) return;
+  if (file.size > 5 * 1024 * 1024) {
+    if (productImportStatus)
+      productImportStatus.textContent = "CSV files must be smaller than 5 MB.";
+    productImportFile.value = "";
+    return;
+  }
+  try {
+    const importedProducts = parseProductCsv(await file.text());
+    const existingSkus = new Set(
+      products.map((product) => String(product.code || "").toUpperCase()),
+    );
+    const updates = importedProducts.filter((product) =>
+      existingSkus.has(product.code.toUpperCase()),
+    ).length;
+    const additions = importedProducts.length - updates;
+    pendingProductImport = { products: importedProducts, fileName: file.name };
+    if (productImportStatus) {
+      productImportStatus.textContent =
+        `${file.name}: ${importedProducts.length} valid products. ` +
+        `${additions} will be added and ${updates} matching SKUs updated. ` +
+        "Choose Import products to confirm.";
+    }
+    if (confirmProductImportButton)
+      confirmProductImportButton.disabled = false;
+  } catch (error) {
+    console.error("Could not read product catalogue CSV:", error);
+    if (productImportStatus)
+      productImportStatus.textContent =
+        `Import not ready: ${error.message || "Could not read this CSV file."}`;
+  }
+});
+
+confirmProductImportButton?.addEventListener("click", () => {
+  if (currentUser?.role !== "admin")
+    return showToast("Admin permission required to import products");
+  if (!pendingProductImport)
+    return showToast("Choose and review a valid product CSV first");
+
+  const previousProducts = products.map((product) => ({
+    ...product,
+    aliases: Array.isArray(product.aliases) ? [...product.aliases] : [],
+  }));
+  const previousBranchStock = JSON.parse(JSON.stringify(branchStock || {}));
+  syncCurrentBranchStock();
+  const currentBranch = settings.storeName || "Main Store";
+  const branchInventory = branchStock[currentBranch];
+  let nextProductId =
+    products.reduce(
+      (highest, product) => Math.max(highest, Number(product.id) || 0),
+      0,
+    ) + 1;
+  const productsBySku = new Map(
+    products.map((product) => [
+      String(product.code || "").toUpperCase(),
+      product,
+    ]),
+  );
+  let added = 0;
+  let updated = 0;
+
+  pendingProductImport.products.forEach((importedProduct) => {
+    const sku = importedProduct.code.toUpperCase();
+    let product = productsBySku.get(sku);
+    if (product) {
+      Object.assign(product, importedProduct);
+      branchInventory[String(product.id)] = importedProduct.stock;
+      updated += 1;
+      return;
+    }
+    product = { ...importedProduct, id: nextProductId++ };
+    products.push(product);
+    productsBySku.set(sku, product);
+    branchInventory[String(product.id)] = importedProduct.stock;
+    added += 1;
+  });
+
+  renderAllPanels();
+  renderProducts(search.value);
+  if (!saveState()) {
+    products.splice(0, products.length, ...previousProducts);
+    branchStock = previousBranchStock;
+    renderAllPanels();
+    renderProducts(search.value);
+    if (productImportStatus)
+      productImportStatus.textContent =
+        "Import was cancelled because the updated catalogue could not be saved.";
+    pendingProductImport = null;
+    if (confirmProductImportButton)
+      confirmProductImportButton.disabled = true;
+    return;
+  }
+
+  const fileName = pendingProductImport.fileName;
+  pendingProductImport = null;
+  if (productImportFile) productImportFile.value = "";
+  if (confirmProductImportButton)
+    confirmProductImportButton.disabled = true;
+  if (productImportStatus) {
+    productImportStatus.textContent =
+      `${fileName} imported: ${added} products added and ${updated} matching SKUs updated. ` +
+      "Other products, sales and customer records were kept.";
+  }
+  showToast(`${added} products added; ${updated} existing products updated`);
+});
 
 document
   .querySelector("#inventoryTable")
@@ -4302,7 +4561,7 @@ document.querySelector("#saveSettingsButton")?.addEventListener("click", () => {
     settings.branches.push(settings.storeName);
   renderStoreOptions();
   settings.currency = document.querySelector("#currencySelect").value;
-  settings.language = document.querySelector("#languageSelect").value;
+  settings.language = "en-GB";
   settings.theme = document.querySelector("#themeSelect").value;
   settings.backgroundColor = document.querySelector(
     "#backgroundColorInput",
@@ -4533,10 +4792,10 @@ document.querySelector("#addAccountButton")?.addEventListener("click", () => {
     <label>Full name<input id="newAccountName" required></label>
     <label>Username<input id="newAccountUsername" autocomplete="username" required></label>
     <label>Email<input id="newAccountEmail" type="email" autocomplete="email" required></label>
-    <label>Phone (optional)<input id="newAccountPhone" type="tel" inputmode="tel" placeholder="07XXXXXXXX or +2547XXXXXXX"></label>
+    <label>Phone number<input id="newAccountPhone" type="tel" inputmode="tel" placeholder="07XXXXXXXX or +2547XXXXXXX" required></label>
     <label>Password<input id="newAccountPassword" type="password" autocomplete="new-password" minlength="6" required></label>
     <label>Role<select id="newAccountRole"><option value="cashier">Cashier</option>${adminOption}</select></label>
-    <p class="modal-note">Up to 3 administrator accounts are allowed, including the first administrator. Current count: ${adminCount}/3. New staff must verify their email before signing in.</p>`,
+    <p class="modal-note">Up to 3 administrator accounts are allowed, including the first administrator. Staff sign in with the phone number and password set by an administrator.</p>`,
     actionButtons("Create account"),
   );
 });
@@ -4559,7 +4818,7 @@ document.addEventListener("click", async (event) => {
       "How was your experience?",
       `
       <p class="modal-note">Rate this sale from 1 to 5 stars to help us improve.</p>
-      <div class="rating-row">${[1, 2, 3, 4, 5].map((n) => `<button type="button" class="rating-star" data-rating="${n}">â˜…</button>`).join("")}</div>`,
+      <div class="rating-row">${[1, 2, 3, 4, 5].map((n) => `<button type="button" class="rating-star" data-rating="${n}">★</button>`).join("")}</div>`,
       `<button type="button" class="modal-primary" data-modal-action="cancel">Close</button>`,
     );
     return;
@@ -4708,7 +4967,7 @@ document.addEventListener("click", async (event) => {
     const password = document.querySelector("#newAccountPassword").value;
     const role = document.querySelector("#newAccountRole").value;
     const adminCount = users.filter((user) => user.role === "admin").length;
-    if (!name || !username || !email || !password)
+    if (!name || !username || !email || !phone || !password)
       return showToast("Complete all required staff details");
     if (!/^[a-z0-9._-]{2,60}$/i.test(username))
       return showToast(
@@ -4716,7 +4975,8 @@ document.addEventListener("click", async (event) => {
       );
     if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email))
       return showToast("Enter a valid email address");
-    if (phone && !normalizeKenyanPhone(phone))
+    const normalizedPhone = normalizeKenyanPhone(phone);
+    if (!normalizedPhone)
       return showToast("Enter a valid Kenyan phone number");
     if (password.length < 6)
       return showToast("Password must be at least 6 characters");
@@ -4737,7 +4997,7 @@ document.addEventListener("click", async (event) => {
         name,
         username,
         email,
-        phone: phone ? normalizeKenyanPhone(phone) : "",
+        phone: `+${normalizedPhone}`,
         role,
         password,
       });
@@ -4753,17 +5013,21 @@ document.addEventListener("click", async (event) => {
     } catch (error) {
       console.error("Could not create Supabase staff account:", error);
       const message = String(error.message || "");
-      showToast(
-        error.code === "auth/email-already-in-use"
-          ? "That email already has a Supabase account."
-          : message.includes("maximum of 3 administrators")
-            ? "The store already has the maximum of 3 administrators."
-            : message.includes("already has an account")
-              ? "That email already has a Supabase account."
-              : message.includes("username already exists")
-                ? "That username is already in use."
-                : "Could not create the cloud account. Check Supabase Auth and the create-staff Edge Function.",
-      );
+      let userMessage =
+        "Could not create the cloud account. Check Supabase Auth and the create-staff Edge Function.";
+      if (
+        error.code === "auth/phone-already-in-use" ||
+        message.includes("phone number already has an account")
+      ) {
+        userMessage = "That phone number already has a Supabase account.";
+      } else if (message.includes("maximum of 3 administrators")) {
+        userMessage = "The store already has the maximum of 3 administrators.";
+      } else if (message.includes("contact email is already used")) {
+        userMessage = "That contact email is already used by another POS account.";
+      } else if (message.includes("username already exists")) {
+        userMessage = "That username is already in use.";
+      }
+      showToast(userMessage);
     }
     return;
   }
@@ -4803,7 +5067,7 @@ document.addEventListener("click", async (event) => {
         ),
         icon: "＋",
       });
-      showToast(`${name} added to catalog`);
+      showToast(`${name} added to the catalogue`);
     }
     renderInventoryPanel();
     renderProducts(search.value);

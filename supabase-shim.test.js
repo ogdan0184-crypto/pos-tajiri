@@ -30,17 +30,39 @@ const STORAGE_KEY = "sb-abcdefg-auth-token";
 function makeSupabaseClientMock() {
   const calls = {
     signInWithPassword: [],
+    signInWithOtp: [],
     signUp: [],
     rpc: [],
     invoke: [],
     resetPasswordForEmail: [],
     updateUser: [],
+    resend: [],
+    verifyOtp: [],
   };
   // rows for `from(table).select("*").eq(keyColumn, id).maybeSingle()`
   const rowResults = new Map(); // `${table}:${key}` -> { row?, error? }
   const tableRows = new Map(); // table -> [rows]
+  let client;
+  const mutationQuery = getError => {
+    const query = {
+      eq: vi.fn(() => query),
+      then(resolve, reject) {
+        return Promise.resolve({ error: getError() }).then(resolve, reject);
+      },
+    };
+    return query;
+  };
+  const upsert = vi.fn(() =>
+    mutationQuery(() => client.__upsertError),
+  );
+  const update = vi.fn(() =>
+    mutationQuery(() => client.__updateError),
+  );
+  const deleteRow = vi.fn(() =>
+    mutationQuery(() => client.__deleteError),
+  );
 
-  const client = {
+  client = {
     __calls: calls,
     __rowResults: rowResults,
     __tableRows: tableRows,
@@ -50,6 +72,10 @@ function makeSupabaseClientMock() {
         return client.__nextSignIn
           ? await client.__nextSignIn(args)
           : { data: { session: null, user: null }, error: null };
+      }),
+      signInWithOtp: vi.fn(async (args) => {
+        calls.signInWithOtp.push(args);
+        return client.__nextSignInOtp || { error: null };
       }),
       signUp: vi.fn(async (args) => {
         calls.signUp.push(args);
@@ -70,6 +96,17 @@ function makeSupabaseClientMock() {
       resetPasswordForEmail: vi.fn(async (email) => {
         calls.resetPasswordForEmail.push(email);
         return client.__nextReset || { error: null };
+      }),
+      resend: vi.fn(async args => {
+        calls.resend.push(args);
+        return client.__nextResend || { error: null };
+      }),
+      verifyOtp: vi.fn(async args => {
+        calls.verifyOtp.push(args);
+        return client.__nextVerifyOtp || {
+          data: { session: null, user: null },
+          error: null,
+        };
       }),
       updateUser: vi.fn(async (payload) => {
         calls.updateUser.push(payload);
@@ -99,9 +136,9 @@ function makeSupabaseClientMock() {
           };
           return selectBuilder;
         },
-        upsert: vi.fn(async () => ({ error: client.__upsertError || null })),
-        update: vi.fn(async () => ({ error: client.__updateError || null })),
-        delete: vi.fn(async () => ({ error: client.__deleteError || null })),
+        upsert,
+        update,
+        delete: deleteRow,
       };
       return builder;
     },
@@ -178,6 +215,8 @@ const SESSION = {
     id: "user-1",
     email: "admin@example.com",
     email_confirmed_at: "2026-01-01T00:00:00Z",
+    phone: "+254712345678",
+    phone_confirmed_at: "2026-01-01T00:00:00Z",
     user_metadata: { display_name: "Ada" },
   },
 };
@@ -278,10 +317,14 @@ describe("configuration bootstrap", () => {
 
   it("resolves ready=false with a friendly error when initialization throws", async () => {
     const client = makeSupabaseClientMock();
-    client.auth.getSession = vi.fn(() => {
+    const { window, injectedScript } = loadShim({
+      client,
+      autoLoad: false,
+    });
+    window.supabase.createClient.mockImplementation(() => {
       throw new Error("boom");
     });
-    const { window } = loadShim({ client });
+    injectedScript.onload();
     expect(await window.__tajiriBackendReady).toBe(false);
     expect(window.__tajiriFirebaseError).toMatch(/Cloud sign-in is unavailable/i);
   });
@@ -294,7 +337,11 @@ describe("configuration bootstrap", () => {
 describe("firebaseAuthErrorMessage", () => {
   const cases = [
     ["Invalid login credentials", null, "The email or password is incorrect."],
-    ["Email not confirmed", null, "Verify your email before signing in."],
+    [
+      "Email not confirmed",
+      null,
+      "Email confirmation is still enabled in Supabase. Disable it to allow password-only sign-in.",
+    ],
     [
       "User already registered",
       null,
@@ -440,7 +487,10 @@ describe("createUserWithEmailAndPassword", () => {
     expect(client.auth.signUp).toHaveBeenCalledWith({
       email: "new@example.com",
       password: "secret",
-      options: { data: { display_name: "Bob" } },
+      options: {
+        data: { display_name: "Bob" },
+        emailRedirectTo: "https://pos.example.test/",
+      },
     });
     expect(user.uid).toBe("user-1");
     expect(JSON.parse(window.localStorage.getItem(STORAGE_KEY)).currentSession)
@@ -491,6 +541,164 @@ describe("createUserWithEmailAndPassword", () => {
     await expect(
       window.firebaseAuth.createUserWithEmailAndPassword("a@b.c", "x"),
     ).rejects.toMatchObject({ code });
+  });
+});
+
+describe("email verification codes", () => {
+  it("verifies signup codes with the Supabase signup token type", async () => {
+    const client = makeSupabaseClientMock();
+    client.__nextVerifyOtp = { data: { session: SESSION }, error: null };
+    const { window } = loadShim({ client });
+
+    const result = await window.firebaseAuth.verifyEmailCode(
+      "new@example.com",
+      "123456",
+    );
+
+    expect(client.auth.verifyOtp).toHaveBeenCalledWith({
+      email: "new@example.com",
+      token: "123456",
+      type: "signup",
+    });
+    expect(result.user.uid).toBe("user-1");
+    expect(JSON.parse(window.localStorage.getItem(STORAGE_KEY)).currentSession)
+      .toEqual(SESSION);
+  });
+
+  it("maps invalid signup codes to an actionable error code", async () => {
+    const client = makeSupabaseClientMock();
+    client.__nextVerifyOtp = {
+      data: null,
+      error: { message: "Token has expired" },
+    };
+    const { window } = loadShim({ client });
+
+    await expect(
+      window.firebaseAuth.verifyEmailCode("new@example.com", "123456"),
+    ).rejects.toMatchObject({ code: "auth/invalid-verification-code" });
+  });
+
+  it("resends signup codes via Supabase Auth", async () => {
+    const client = makeSupabaseClientMock();
+    const { window } = loadShim({ client });
+
+    await window.firebaseAuth.resendVerificationEmail("new@example.com");
+
+    expect(client.auth.resend).toHaveBeenCalledWith({
+      type: "signup",
+      email: "new@example.com",
+    });
+  });
+});
+
+describe("phone authentication", () => {
+  it("starts signup with a phone identity and contact metadata", async () => {
+    const client = makeSupabaseClientMock();
+    client.__nextSignUp = async () => ({
+      data: { user: { id: "new-user", phone: "+254712345678" }, session: null },
+      error: null,
+    });
+    const { window } = loadShim({ client });
+
+    const result = await window.firebaseAuth.createUserWithPhoneAndPassword(
+      "+254712345678",
+      "secret1",
+      { display_name: "Ada", email_contact: "ada@example.com" },
+    );
+
+    expect(client.auth.signUp).toHaveBeenCalledWith({
+      phone: "+254712345678",
+      password: "secret1",
+      options: {
+        data: { display_name: "Ada", email_contact: "ada@example.com" },
+      },
+    });
+    expect(result.user).toMatchObject({
+      uid: "new-user",
+      phone: "+254712345678",
+      phoneVerified: false,
+    });
+  });
+
+  it("rejects signup when Supabase allows an unconfirmed phone session", async () => {
+    const client = makeSupabaseClientMock();
+    client.__nextSignUp = async () => ({
+      data: {
+        user: { id: "new-user", phone: "+254712345678" },
+        session: { access_token: "unverified-token" },
+      },
+      error: null,
+    });
+    const { window } = loadShim({ client });
+
+    await expect(
+      window.firebaseAuth.createUserWithPhoneAndPassword(
+        "+254712345678",
+        "secret1",
+      ),
+    ).rejects.toMatchObject({ code: "auth/phone-confirmation-disabled" });
+    expect(client.auth.signOut).toHaveBeenCalled();
+  });
+
+  it("identifies Supabase phone-provider-disabled signup errors", async () => {
+    const client = makeSupabaseClientMock();
+    client.__nextSignUp = async () => ({
+      data: null,
+      error: {
+        code: "phone_provider_disabled",
+        message: "Phone signups are disabled",
+      },
+    });
+    const { window } = loadShim({ client });
+
+    await expect(
+      window.firebaseAuth.createUserWithPhoneAndPassword(
+        "+254712345678",
+        "secret1",
+      ),
+    ).rejects.toMatchObject({ code: "auth/phone-signup-disabled" });
+  });
+
+  it("verifies SMS codes as phone OTPs", async () => {
+    const client = makeSupabaseClientMock();
+    client.__nextVerifyOtp = { data: { session: SESSION }, error: null };
+    const { window } = loadShim({ client });
+
+    const result = await window.firebaseAuth.verifyPhoneCode(
+      "+254712345678",
+      "123456",
+    );
+
+    expect(client.auth.verifyOtp).toHaveBeenCalledWith({
+      phone: "+254712345678",
+      token: "123456",
+      type: "sms",
+    });
+    expect(result.user.phoneVerified).toBe(true);
+  });
+
+  it("resends SMS signup codes through Supabase Auth", async () => {
+    const client = makeSupabaseClientMock();
+    const { window } = loadShim({ client });
+
+    await window.firebaseAuth.resendPhoneVerificationCode("+254712345678");
+
+    expect(client.auth.resend).toHaveBeenCalledWith({
+      type: "sms",
+      phone: "+254712345678",
+    });
+  });
+
+  it("requests password-reset SMS without allowing account creation", async () => {
+    const client = makeSupabaseClientMock();
+    const { window } = loadShim({ client });
+
+    await window.firebaseAuth.sendPhonePasswordResetCode("+254712345678");
+
+    expect(client.auth.signInWithOtp).toHaveBeenCalledWith({
+      phone: "+254712345678",
+      options: { shouldCreateUser: false },
+    });
   });
 });
 
@@ -945,12 +1153,13 @@ describe("firebaseDb", () => {
       shopName: "Amina's Market",
       name: "Ada",
       username: "ada",
+      email: "ada@example.com",
     });
     expect(client.rpc).toHaveBeenCalledWith("create_shop_for_current_user", {
       p_shop_name: "Amina's Market",
       p_name: "Ada",
       p_username: "ada",
-      p_phone: "",
+      p_email: "ada@example.com",
     });
     expect(result).toEqual(profile);
   });
@@ -964,6 +1173,7 @@ describe("firebaseDb", () => {
         shopName: "Amina's Market",
         name: "Ada",
         username: "ada",
+        email: "ada@example.com",
       }),
     ).rejects.toThrow("migration required");
 
@@ -973,6 +1183,7 @@ describe("firebaseDb", () => {
         shopName: "Amina's Market",
         name: "Ada",
         username: "ada",
+        email: "ada@example.com",
       }),
     ).rejects.toThrow(/shop membership/i);
   });
@@ -1048,14 +1259,14 @@ describe("tajiriSupabase.createStaffAccount", () => {
     ).rejects.toThrow(/did not return the new staff profile/i);
   });
 
-  it("extracts the error message from the response body and tags duplicate emails", async () => {
+  it("extracts the error message and tags duplicate phone accounts", async () => {
     const client = makeSupabaseClientMock();
     client.__nextInvoke = {
       data: null,
       error: {
         message: "HTTP 409",
         context: {
-          json: async () => ({ error: "This staff member already has an account." }),
+          json: async () => ({ error: "That phone number already has an account." }),
         },
       },
     };
@@ -1063,8 +1274,8 @@ describe("tajiriSupabase.createStaffAccount", () => {
     await expect(
       window.tajiriSupabase.createStaffAccount({ name: "S" }),
     ).rejects.toMatchObject({
-      message: "This staff member already has an account.",
-      code: "auth/email-already-in-use",
+      message: "That phone number already has an account.",
+      code: "auth/phone-already-in-use",
     });
   });
 

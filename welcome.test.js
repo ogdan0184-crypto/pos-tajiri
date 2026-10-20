@@ -11,10 +11,12 @@ const fs = require("node:fs");
 const path = require("node:path");
 const crypto = require("node:crypto");
 const { JSDOM } = require("jsdom");
-const { beforeEach, describe, expect, it, vi } = await import("vitest");
+const { afterEach, beforeEach, describe, expect, it, vi } =
+  await import("vitest");
 
 const SOURCE_PATH = path.join(__dirname, "welcome.js");
 const source = fs.readFileSync(SOURCE_PATH, "utf8");
+const openDoms = new Set();
 
 /* ---------- DOM fixture ---------- */
 
@@ -27,9 +29,8 @@ const FIXTURE_HTML = `
     <div id="heroAccounts"></div>
   </section>
 
-  <div id="modal-access" hidden>
-    <div class="modal-layer">
-      <div role="dialog">
+  <div id="modal-access" class="modal-layer" hidden>
+    <div role="dialog">
         <div class="modal-head"><h2>Sign in to Tajiri POS</h2></div>
         <div class="auth-card">
           <button id="tabLogin" data-tab="login">Sign in</button>
@@ -49,7 +50,6 @@ const FIXTURE_HTML = `
             <p class="auth-sub">Set up the first administrator.</p>
             <input id="signupShopName" />
             <input id="signupName" />
-            <input id="signupUsername" />
             <input id="signupEmail" />
             <input id="signupPhone" />
             <label><input id="signupRole" /></label>
@@ -58,26 +58,34 @@ const FIXTURE_HTML = `
             <button id="signupSubmit" type="submit">Create account →</button>
             <p id="signupError" hidden></p>
             <p id="adminSetupError" hidden></p>
-            <div id="strengthMeter" hidden>
+            <div id="passwordStrength" hidden>
               <div id="strengthFill"></div>
               <span id="strengthLabel"></span>
             </div>
           </form>
+          <form id="signupVerifyForm" class="auth-form" hidden>
+            <strong id="signupVerifyPhone"></strong>
+            <input id="signupVerificationCode" />
+            <button id="signupVerifySubmit" type="submit">Verify phone</button>
+            <button id="signupVerifyResend" type="button">Resend code</button>
+            <button id="signupVerifyBack" type="button">Back to sign in</button>
+            <p id="signupVerifyError" hidden></p>
+          </form>
         </div>
-      </div>
     </div>
   </div>
 
-  <div id="modal-password-reset" hidden>
-    <div class="modal-layer">
-      <form id="passwordResetForm">
-        <input id="passwordResetIdentity" />
-        <p id="passwordResetError" hidden></p>
-      </form>
-      <form id="passwordResetConfirmForm">
-        <p id="passwordResetConfirmError" hidden></p>
-      </form>
-    </div>
+  <div id="modal-password-reset" class="modal-layer" hidden>
+    <form id="passwordResetForm">
+      <input id="passwordResetIdentity" />
+      <p id="passwordResetError" hidden></p>
+    </form>
+    <form id="passwordResetConfirmForm">
+      <input id="passwordResetCode" />
+      <input id="passwordResetNewPassword" />
+      <a id="passwordResetResend" href="#">Resend code</a>
+      <p id="passwordResetConfirmError" hidden></p>
+    </form>
   </div>
 
   <div id="toast"></div>
@@ -95,6 +103,8 @@ function makeFirebaseStubs() {
         user: {
           uid: "uid-1",
           emailVerified: true,
+          phoneVerified: true,
+          phone: "+254712345678",
           displayName: "Ada",
           sendEmailVerification: vi.fn().mockResolvedValue(undefined),
           updateProfile: vi.fn().mockResolvedValue(undefined),
@@ -109,6 +119,29 @@ function makeFirebaseStubs() {
           delete: vi.fn().mockResolvedValue(undefined),
         },
       }),
+      verifyEmailCode: vi.fn().mockResolvedValue({ user: { uid: "uid-new" } }),
+      resendVerificationEmail: vi.fn().mockResolvedValue(undefined),
+      signInWithPhoneAndPassword: vi.fn().mockResolvedValue({
+        user: {
+          uid: "uid-1",
+          phoneVerified: true,
+          phone: "+254712345678",
+          displayName: "Ada",
+        },
+      }),
+      createUserWithPhoneAndPassword: vi.fn().mockResolvedValue({
+        user: {
+          uid: "uid-new",
+          phone: "+254712345678",
+          phoneVerified: false,
+        },
+      }),
+      verifyPhoneCode: vi.fn().mockResolvedValue({
+        user: { uid: "uid-new", phoneVerified: true },
+      }),
+      resendPhoneVerificationCode: vi.fn().mockResolvedValue(undefined),
+      sendPhonePasswordResetCode: vi.fn().mockResolvedValue(undefined),
+      verifyPhonePasswordResetCode: vi.fn().mockResolvedValue(undefined),
       sendPasswordResetEmail: vi.fn().mockResolvedValue(undefined),
       signOut: vi.fn().mockResolvedValue(undefined),
       currentUser: null,
@@ -143,6 +176,7 @@ function loadWelcomePage({
     runScripts: "outside-only",
     pretendToBeVisual: true,
   });
+  openDoms.add(dom);
   const win = dom.window;
 
   // jsdom's Location is read-only; replace it with a controllable stub.
@@ -254,6 +288,10 @@ describe("welcome.js", () => {
   beforeEach(() => {
     vi.restoreAllMocks();
   });
+  afterEach(() => {
+    for (const dom of openDoms) dom.window.close();
+    openDoms.clear();
+  });
 
   describe("boot-time rendering", () => {
     it("activates the login tab by default and hides other forms", () => {
@@ -338,6 +376,7 @@ describe("welcome.js", () => {
           runScripts: "outside-only",
           pretendToBeVisual: true,
         });
+        openDoms.add(dom);
         const win = dom.window;
         win.localStorage.setItem("tajiri-remembered-user", "ada");
         win.localStorage.setItem("tajiri-remembered-role", "admin");
@@ -356,6 +395,7 @@ describe("welcome.js", () => {
           runScripts: "outside-only",
           pretendToBeVisual: true,
         });
+        openDoms.add(dom);
         const win = dom.window;
         win.localStorage.setItem("tajiri-remembered-user", "mallory");
         win.localStorage.setItem("tajiri-remembered-role", "admin");
@@ -381,21 +421,20 @@ describe("welcome.js", () => {
       expect(doc.getElementById("modal-access").hidden).toBe(false);
     });
 
-    it("switches to the signup tab only via [data-tab] clicks", () => {
+    it("switches to the signup tab via [data-tab] clicks when cloud auth is ready", () => {
       const dom = loadWelcomePage({
         url: "https://pos.example.test/welcome.html?roleShell=admin",
+        stubs: makeFirebaseStubs(),
       });
       const doc = dom.window.document;
-      // tabSignup is hidden while admin signup is not allowed...
-      expect(doc.getElementById("tabSignup").hidden).toBe(true);
-      // ...but the switch mechanism itself still responds to data-tab clicks.
+      expect(doc.getElementById("tabSignup").hidden).toBe(false);
       doc.getElementById("tabLogin").dataset.tab = "signup";
       click(dom, "#tabLogin");
       expect(
         doc.getElementById("signupForm").classList.contains("active"),
       ).toBe(true);
       expect(doc.querySelector(".modal-head h2").textContent).toBe(
-        "Set up administrator",
+        "Start your free shop trial",
       );
     });
 
@@ -448,18 +487,19 @@ describe("welcome.js", () => {
       );
     });
 
-    it("rejects an unknown username", () => {
+    it("rejects an unknown username", async () => {
       const dom = loadWelcomePage();
       const doc = dom.window.document;
       doc.getElementById("loginIdentity").value = "nobody";
       doc.getElementById("loginPassword").value = "hunter22";
       submitForm(dom, "loginForm");
+      await flush();
       expect(textOfError(dom, "loginError").text).toBe(
         "That username/email and password combination was not found.",
       );
     });
 
-    it("rejects a wrong password for a known account", () => {
+    it("rejects a wrong password for a known account", async () => {
       const dom = loadWelcomePage();
       const win = dom.window;
       win.localStorage.setItem(
@@ -476,6 +516,7 @@ describe("welcome.js", () => {
       docSetup(dom);
       docSetupLogin(dom, "ada", "hunter22");
       submitForm(dom, "loginForm");
+      await flush();
       expect(textOfError(dom, "loginError").text).toBe(
         "That username/email and password combination was not found.",
       );
@@ -565,7 +606,6 @@ describe("welcome.js", () => {
       );
       // Remembered credentials persist beyond the session.
       expect(win.localStorage.getItem("tajiri-remembered-user")).toBe("ada");
-      expect(win.__location.reload).toHaveBeenCalled();
     });
 
     it("clears remembered credentials when 'remember me' is unchecked", async () => {
@@ -619,58 +659,70 @@ describe("welcome.js", () => {
   });
 
   describe("signup validation (cloud required)", () => {
-    it("blocks signup entirely when Supabase is unavailable", () => {
+    it("blocks signup entirely when Supabase is unavailable", async () => {
       const dom = loadWelcomePage({
         url: "https://pos.example.test/welcome.html?roleShell=admin",
       });
       submitForm(dom, "signupForm");
+      await flush();
       expect(textOfError(dom, "signupError").text).toBe(
         "Cloud account setup is unavailable. Check Supabase Authentication and the Tajiri POS schema, then refresh.",
       );
     });
 
-    it("requires every field", () => {
+    it("requires every field", async () => {
       const dom = loadWelcomePage({
         url: "https://pos.example.test/welcome.html?roleShell=admin",
         stubs: makeFirebaseStubs(),
       });
       submitForm(dom, "signupForm");
+      await flush();
       expect(textOfError(dom, "signupError").text).toBe(
         "Enter your shop name and complete all required fields.",
       );
     });
 
-    it("rejects usernames outside a-z0-9._- (2–60 chars)", () => {
+    it("derives a safe username from the contact email after verifying the phone", async () => {
+      const stubs = makeFirebaseStubs();
       const dom = loadWelcomePage({
         url: "https://pos.example.test/welcome.html?roleShell=admin",
-        stubs: makeFirebaseStubs(),
+        stubs,
       });
-      fillSignup(dom, { username: "bad user!", email: "a@b.co" });
+      await flush();
+      fillSignup(dom, { email: "ada+shop@example.test" });
       submitForm(dom, "signupForm");
-      expect(textOfError(dom, "signupError").text).toBe(
-        "Use 2–60 letters, numbers, dots, underscores, or hyphens for the username.",
+      await flush();
+      dom.window.document.getElementById("signupVerificationCode").value =
+        "123456";
+      submitForm(dom, "signupVerifyForm");
+      await flush();
+      const pendingProfile = JSON.parse(
+        dom.window.localStorage.getItem("tajiri-pending-admin-profile"),
       );
+      expect(pendingProfile.username).toMatch(/^adashop-/);
     });
 
-    it("rejects malformed emails", () => {
+    it("rejects malformed emails", async () => {
       const dom = loadWelcomePage({
         url: "https://pos.example.test/welcome.html?roleShell=admin",
         stubs: makeFirebaseStubs(),
       });
       fillSignup(dom, { email: "not-an-email" });
       submitForm(dom, "signupForm");
+      await flush();
       expect(textOfError(dom, "signupError").text).toBe(
-        "Enter a valid email address.",
+        "Enter a valid contact email address.",
       );
     });
 
-    it("rejects non-Kenyan phone numbers", () => {
+    it("rejects non-Kenyan phone numbers", async () => {
       const dom = loadWelcomePage({
         url: "https://pos.example.test/welcome.html?roleShell=admin",
         stubs: makeFirebaseStubs(),
       });
       fillSignup(dom, { phone: "12345" });
       submitForm(dom, "signupForm");
+      await flush();
       expect(textOfError(dom, "signupError").text).toBe(
         "Use a Kenyan phone number without spaces, for example 0712345678.",
       );
@@ -689,41 +741,84 @@ describe("welcome.js", () => {
         submitForm(dom, "signupForm");
         await flush();
 
+        const normalizedPhone =
+          phone.startsWith("011") || phone.startsWith("+25411")
+            ? "+254112345678"
+            : "+254712345678";
         expect(
-          stubs.firebaseAuth.createUserWithEmailAndPassword,
-        ).toHaveBeenCalledWith("ada@example.test", "longenough", {
+          stubs.firebaseAuth.createUserWithPhoneAndPassword,
+        ).toHaveBeenCalledWith(normalizedPhone, "longenough", {
           display_name: "Ada Admin",
+          email_contact: "ada@example.test",
         });
       },
     );
 
-    it("rejects passwords shorter than 6 characters", () => {
+    it("rejects passwords shorter than 6 characters", async () => {
       const dom = loadWelcomePage({
         url: "https://pos.example.test/welcome.html?roleShell=admin",
         stubs: makeFirebaseStubs(),
       });
       fillSignup(dom, { password: "abc12" });
       submitForm(dom, "signupForm");
+      await flush();
       expect(textOfError(dom, "signupError").text).toBe(
         "Use a password with at least 6 characters.",
       );
     });
 
-    it("rejects mismatched password confirmation", () => {
+    it("rejects mismatched password confirmation", async () => {
       const dom = loadWelcomePage({
         url: "https://pos.example.test/welcome.html?roleShell=admin",
         stubs: makeFirebaseStubs(),
       });
       fillSignup(dom, { password: "longenough", confirmation: "longenough2" });
       submitForm(dom, "signupForm");
+      await flush();
       expect(textOfError(dom, "signupError").text).toBe(
         "The passwords do not match.",
+      );
+    });
+
+    it("rejects an invalid SMS code and supports resending", async () => {
+      const stubs = makeFirebaseStubs();
+      stubs.firebaseAuth.verifyPhoneCode = vi
+        .fn()
+        .mockRejectedValue(
+          Object.assign(new Error("Token has expired"), {
+            code: "auth/invalid-verification-code",
+          }),
+        );
+      const dom = loadWelcomePage({
+        url: "https://pos.example.test/welcome.html?roleShell=admin",
+        stubs,
+      });
+      await flush();
+      fillSignup(dom);
+      submitForm(dom, "signupForm");
+      await flush();
+
+      const doc = dom.window.document;
+      doc.getElementById("signupVerificationCode").value = "123456";
+      submitForm(dom, "signupVerifyForm");
+      await flush();
+      expect(textOfError(dom, "signupVerifyError").text).toContain(
+        "invalid or expired",
+      );
+      expect(
+        dom.window.localStorage.getItem("tajiri-pending-admin-profile"),
+      ).toBeNull();
+
+      doc.getElementById("signupVerifyResend").click();
+      await flush();
+      expect(stubs.firebaseAuth.resendPhoneVerificationCode).toHaveBeenCalledWith(
+        "+254712345678",
       );
     });
   });
 
   describe("signup with Supabase", () => {
-    it("allows a new shop signup even when the legacy admin bootstrap exists", async () => {
+    it("shows phone verification after signup even when legacy admin bootstrap exists", async () => {
       const stubs = makeFirebaseStubs();
       // The boot-time check reads system/bootstrap: report that it exists.
       stubs.firebaseDb.collection = () => ({
@@ -740,13 +835,12 @@ describe("welcome.js", () => {
       fillSignup(dom, {});
       submitForm(dom, "signupForm");
       await flush();
-      expect(stubs.firebaseAuth.createUserWithEmailAndPassword).toHaveBeenCalled();
-      expect(textOfError(dom, "signupError").text).toContain(
-        "verify the address",
-      );
+      expect(stubs.firebaseAuth.createUserWithPhoneAndPassword).toHaveBeenCalled();
+      expect(dom.window.document.getElementById("signupVerifyForm").hidden).toBe(false);
+      expect(dom.window.document.getElementById("signupForm").hidden).toBe(true);
     });
 
-    it("creates the account and requests email verification", async () => {
+    it("requires one SMS code before preparing phone/password sign-in", async () => {
       const stubs = makeFirebaseStubs();
       const dom = loadWelcomePage({
         url: "https://pos.example.test/welcome.html?roleShell=admin",
@@ -761,18 +855,27 @@ describe("welcome.js", () => {
       await flush();
 
       expect(
-        stubs.firebaseAuth.createUserWithEmailAndPassword,
-      ).toHaveBeenCalledWith("ada@example.test", "longenough", {
+        stubs.firebaseAuth.createUserWithPhoneAndPassword,
+      ).toHaveBeenCalledWith("+254712345678", "longenough", {
         display_name: "Ada Admin",
+        email_contact: "ada@example.test",
       });
-      const user = (
-        await stubs.firebaseAuth.createUserWithEmailAndPassword.mock.results[0]
-          .value
-      ).user;
-      expect(user.updateProfile).toHaveBeenCalledWith({
-        displayName: "Ada Admin",
-      });
-      expect(user.sendEmailVerification).toHaveBeenCalled();
+      expect(
+        dom.window.localStorage.getItem("tajiri-pending-admin-profile"),
+      ).toBeNull();
+      expect(stubs.firebaseAuth.verifyPhoneCode).not.toHaveBeenCalled();
+      expect(doc.getElementById("signupVerifyForm").hidden).toBe(false);
+      expect(doc.getElementById("signupVerifyPhone").textContent).toBe(
+        "+254712345678",
+      );
+      doc.getElementById("signupVerificationCode").value = "123456";
+      submitForm(dom, "signupVerifyForm");
+      await flush();
+
+      expect(stubs.firebaseAuth.verifyPhoneCode).toHaveBeenCalledWith(
+        "+254712345678",
+        "123456",
+      );
       expect(
         JSON.parse(
           dom.window.localStorage.getItem("tajiri-pending-admin-profile"),
@@ -782,21 +885,26 @@ describe("welcome.js", () => {
         name: "Ada Admin",
         username: "ada-uid-new",
         email: "ada@example.test",
-        phone: "",
+        phone: "+254712345678",
       });
       expect(stubs.firebaseAuth.signOut).toHaveBeenCalled();
-      expect(textOfError(dom, "signupError").text).toBe(
-        "Check your email and verify the address. Then sign in here to create your shop and start the 14-day trial.",
-      );
+      expect(doc.getElementById("signupVerifyForm").hidden).toBe(true);
+      expect(doc.getElementById("loginForm").hidden).toBe(false);
+      expect(doc.getElementById("loginIdentity").value).toBe("+254712345678");
+      expect(
+        dom.window.localStorage.getItem(
+          "tajiri-verification-sends:+254712345678",
+        ),
+      ).toBeNull();
     });
 
-    it("explains when the signup email is already registered", async () => {
+    it("explains when the signup phone is already registered", async () => {
       const stubs = makeFirebaseStubs();
-      stubs.firebaseAuth.createUserWithEmailAndPassword = vi
+      stubs.firebaseAuth.createUserWithPhoneAndPassword = vi
         .fn()
         .mockRejectedValue(
           Object.assign(new Error("already used"), {
-            code: "auth/email-already-in-use",
+            code: "auth/phone-already-in-use",
           }),
         );
       const dom = loadWelcomePage({
@@ -809,13 +917,36 @@ describe("welcome.js", () => {
       await flush();
 
       expect(textOfError(dom, "signupError").text).toBe(
-        "An account already exists for this email. Sign in or use password reset.",
+        "An account already exists for this phone number. Sign in instead.",
+      );
+    });
+
+    it("explains when Supabase phone signup is disabled", async () => {
+      const stubs = makeFirebaseStubs();
+      stubs.firebaseAuth.createUserWithPhoneAndPassword = vi
+        .fn()
+        .mockRejectedValue(
+          Object.assign(new Error("Phone signups are disabled"), {
+            code: "auth/phone-signup-disabled",
+          }),
+        );
+      const dom = loadWelcomePage({
+        url: "https://pos.example.test/welcome.html?roleShell=admin",
+        stubs,
+      });
+      await flush();
+      fillSignup(dom);
+      submitForm(dom, "signupForm");
+      await flush();
+
+      expect(textOfError(dom, "signupError").text).toBe(
+        "Phone sign-in is disabled in Supabase. Enable Authentication → Providers → Phone, turn on phone confirmation, and configure an SMS provider.",
       );
     });
   });
 
   describe("Supabase login", () => {
-    it("demands an email address for cloud sign-in", async () => {
+    it("demands a Kenyan phone number for cloud sign-in", async () => {
       const stubs = makeFirebaseStubs();
       const dom = loadWelcomePage({ stubs });
       const doc = dom.window.document;
@@ -824,7 +955,7 @@ describe("welcome.js", () => {
       submitForm(dom, "loginForm");
       await flush();
       expect(textOfError(dom, "loginError").text).toBe(
-        "Sign in with the email address set by your administrator.",
+        "Sign in with the Kenyan phone number set by your administrator.",
       );
       expect(doc.getElementById("loginSubmit").disabled).toBe(false);
     });
@@ -840,7 +971,7 @@ describe("welcome.js", () => {
       });
       const dom = loadWelcomePage({ stubs });
       const doc = dom.window.document;
-      doc.getElementById("loginIdentity").value = "ada@example.test";
+      doc.getElementById("loginIdentity").value = "+254712345678";
       doc.getElementById("loginPassword").value = "longenough";
       submitForm(dom, "loginForm");
       await flush();
@@ -854,20 +985,65 @@ describe("welcome.js", () => {
 
     it("maps Supabase auth error codes to a friendly message", async () => {
       const stubs = makeFirebaseStubs();
-      stubs.firebaseAuth.signInWithEmailAndPassword = vi
+      stubs.firebaseAuth.signInWithPhoneAndPassword = vi
         .fn()
         .mockRejectedValue(
           Object.assign(new Error("bad"), { code: "auth/wrong-password" }),
         );
       const dom = loadWelcomePage({ stubs });
       const doc = dom.window.document;
-      doc.getElementById("loginIdentity").value = "ada@example.test";
+      doc.getElementById("loginIdentity").value = "+254712345678";
       doc.getElementById("loginPassword").value = "nope";
       submitForm(dom, "loginForm");
       await flush();
       expect(textOfError(dom, "loginError").text).toBe(
-        "The email or password is incorrect.",
+        "The phone number or password is incorrect.",
       );
+    });
+
+    it("reports disabled phone confirmation without opening a code form", async () => {
+      const stubs = makeFirebaseStubs();
+      stubs.firebaseAuth.signInWithPhoneAndPassword = vi
+        .fn()
+        .mockRejectedValue(
+          Object.assign(new Error("phone not confirmed"), {
+            code: "auth/phone-not-confirmed",
+          }),
+        );
+      const dom = loadWelcomePage({ stubs });
+      const doc = dom.window.document;
+      doc.getElementById("loginIdentity").value = "+254712345678";
+      doc.getElementById("loginPassword").value = "longenough";
+      submitForm(dom, "loginForm");
+      await flush();
+
+      expect(textOfError(dom, "loginError").text).toBe(
+        "Verify your phone number with the signup SMS code before signing in.",
+      );
+      expect(doc.getElementById("signupVerifyForm").hidden).toBe(true);
+    });
+
+    it("blocks a login session for an unverified phone", async () => {
+      const stubs = makeFirebaseStubs();
+      stubs.firebaseAuth.signInWithPhoneAndPassword = vi.fn().mockResolvedValue({
+        user: {
+          uid: "uid-1",
+          phoneVerified: false,
+          phone: "+254712345678",
+        },
+      });
+      const dom = loadWelcomePage({ stubs });
+      const doc = dom.window.document;
+      doc.getElementById("loginIdentity").value = "+254712345678";
+      doc.getElementById("loginPassword").value = "longenough";
+      submitForm(dom, "loginForm");
+      await flush();
+
+      expect(stubs.firebaseAuth.signOut).toHaveBeenCalled();
+      expect(textOfError(dom, "loginError").text).toContain(
+        "Verify your phone number",
+      );
+      expect(dom.window.__location.reload).not.toHaveBeenCalled();
     });
 
     it("starts a session for a verified admin profile", async () => {
@@ -888,7 +1064,7 @@ describe("welcome.js", () => {
       });
       const dom = loadWelcomePage({ stubs });
       const doc = dom.window.document;
-      doc.getElementById("loginIdentity").value = "ada@example.test";
+      doc.getElementById("loginIdentity").value = "+254712345678";
       doc.getElementById("loginPassword").value = "longenough";
       submitForm(dom, "loginForm");
       await flush();
@@ -901,8 +1077,16 @@ describe("welcome.js", () => {
       ).toBe(sessionSignature("ada@example.test", "admin"));
     });
 
-    it("creates a tenant after the owner verifies their signup email", async () => {
+    it("creates a tenant when the verified owner logs in", async () => {
       const stubs = makeFirebaseStubs();
+      stubs.firebaseAuth.signInWithPhoneAndPassword = vi.fn().mockResolvedValue({
+        user: {
+          uid: "uid-1",
+          phoneVerified: true,
+          phone: "+254712345678",
+          displayName: "Ada",
+        },
+      });
       stubs.firebaseDb.collection = () => ({
         doc: () => ({
           get: async () => ({ exists: false, data: () => ({}) }),
@@ -920,10 +1104,10 @@ describe("welcome.js", () => {
           name: "Ada Admin",
           username: "ada-uid-1",
           email: "ada@example.test",
-          phone: "",
+          phone: "+254712345678",
         }),
       );
-      win.document.getElementById("loginIdentity").value = "ada@example.test";
+      win.document.getElementById("loginIdentity").value = "+254712345678";
       win.document.getElementById("loginPassword").value = "longenough";
       submitForm(dom, "loginForm");
       await flush();
@@ -933,7 +1117,7 @@ describe("welcome.js", () => {
         name: "Ada Admin",
         username: "ada-uid-1",
         email: "ada@example.test",
-        phone: "",
+        phone: "+254712345678",
       });
       expect(
         win.localStorage.getItem("tajiri-pos-accounts:shop-new"),
@@ -944,49 +1128,50 @@ describe("welcome.js", () => {
   });
 
   describe("password reset", () => {
-    it("reports that reset delivery is not configured without Supabase", () => {
+    it("reports that reset delivery is not configured without Supabase", async () => {
       const dom = loadWelcomePage();
       submitForm(dom, "passwordResetForm");
+      await flush();
       expect(textOfError(dom, "passwordResetError").text).toBe(
         "Password reset delivery is not configured. Contact your store administrator.",
       );
     });
 
-    it("sends the reset email and closes the modal when Supabase works", async () => {
+    it("sends a password reset SMS and opens the code form", async () => {
       const stubs = makeFirebaseStubs();
       const dom = loadWelcomePage({ stubs });
       const doc = dom.window.document;
       doc.getElementById("modal-password-reset").hidden = false;
-      doc.getElementById("passwordResetIdentity").value = "ada@example.test";
+      doc.getElementById("passwordResetIdentity").value = "0712345678";
       submitForm(dom, "passwordResetForm");
       await flush();
-      expect(stubs.firebaseAuth.sendPasswordResetEmail).toHaveBeenCalledWith(
-        "ada@example.test",
+      expect(stubs.firebaseAuth.sendPhonePasswordResetCode).toHaveBeenCalledWith(
+        "+254712345678",
       );
-      expect(doc.getElementById("modal-password-reset").hidden).toBe(true);
+      expect(doc.getElementById("passwordResetConfirmForm").hidden).toBe(false);
     });
 
-    it("shows an error when the reset email fails", async () => {
+    it("shows an error when reset SMS delivery fails", async () => {
       const stubs = makeFirebaseStubs();
-      stubs.firebaseAuth.sendPasswordResetEmail = vi
+      stubs.firebaseAuth.sendPhonePasswordResetCode = vi
         .fn()
-        .mockRejectedValue(new Error("offline"));
+        .mockRejectedValue(new Error("network unavailable"));
       const dom = loadWelcomePage({ stubs });
       docSetup(dom);
       dom.window.document.getElementById("passwordResetIdentity").value =
-        "ada@example.test";
+        "0712345678";
       submitForm(dom, "passwordResetForm");
       await flush();
       expect(textOfError(dom, "passwordResetError").text).toBe(
-        "Could not send the reset email. Check the address and Supabase email settings.",
+        "Could not reach Supabase. Check your internet connection and try again.",
       );
     });
 
-    it("always reports 'not configured' for the legacy confirm form", () => {
+    it("requires a six-digit SMS code before resetting a password", () => {
       const dom = loadWelcomePage();
       submitForm(dom, "passwordResetConfirmForm");
       expect(textOfError(dom, "passwordResetConfirmError").text).toBe(
-        "Password reset delivery is not configured. Contact your store administrator.",
+        "Enter the 6-digit SMS code.",
       );
     });
   });
@@ -998,7 +1183,7 @@ describe("welcome.js", () => {
       input.value = password;
       input.dispatchEvent(new dom.window.Event("input", { bubbles: true }));
       return {
-        hidden: doc.getElementById("strengthMeter").hidden,
+        hidden: doc.getElementById("passwordStrength").hidden,
         width: doc.getElementById("strengthFill").style.width,
         label: doc.getElementById("strengthLabel").textContent,
       };
@@ -1039,24 +1224,19 @@ describe("welcome.js", () => {
   });
 
   describe("admin setup status messaging", () => {
-    it("shows a permission-denied specific message when the cloud backend rejects the check", async () => {
+    it("allows admin signup when cloud auth is ready without a legacy bootstrap check", async () => {
       const stubs = makeFirebaseStubs();
-      stubs.firebaseDb.collection = () => ({
-        doc: () => ({
-          get: () =>
-            Promise.reject(
-              Object.assign(new Error("denied"), { code: "permission-denied" }),
-            ),
-        }),
-      });
+      stubs.firebaseDb.collection = vi.fn(stubs.firebaseDb.collection);
       const dom = loadWelcomePage({
         url: "https://pos.example.test/welcome.html?roleShell=admin",
         stubs,
       });
       await flush();
-      expect(textOfError(dom, "adminSetupError").text).toContain(
-        "Supabase denied the setup-status check",
+      expect(dom.window.document.getElementById("tabSignup").hidden).toBe(
+        false,
       );
+      expect(textOfError(dom, "adminSetupError").hidden).toBe(true);
+      expect(stubs.firebaseDb.collection).not.toHaveBeenCalled();
     });
   });
 });
@@ -1078,7 +1258,6 @@ function fillSignup(
   {
     shopName = "Amina's Market",
     name = "Ada Admin",
-    username = "ada",
     email = "ada@example.test",
     phone = "0712345678",
     password = "longenough",
@@ -1088,7 +1267,6 @@ function fillSignup(
   const doc = dom.window.document;
   doc.getElementById("signupShopName").value = shopName;
   doc.getElementById("signupName").value = name;
-  doc.getElementById("signupUsername").value = username;
   doc.getElementById("signupEmail").value = email;
   doc.getElementById("signupPhone").value = phone;
   doc.getElementById("signupPassword").value = password;

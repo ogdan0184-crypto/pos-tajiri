@@ -228,11 +228,13 @@ create unique index if not exists users_tenant_username_key
 revoke all on function public.save_shop_state(bigint, jsonb) from public, anon;
 grant execute on function public.save_shop_state(bigint, jsonb) to authenticated;
 
-create or replace function public.create_shop_for_current_user(
+drop function if exists public.create_shop_for_current_user(text, text, text, text);
+
+create function public.create_shop_for_current_user(
   p_shop_name text,
   p_name text,
   p_username text,
-  p_phone text default ''
+  p_email text
 )
 returns jsonb
 language plpgsql
@@ -241,7 +243,7 @@ set search_path = public, auth
 as $$
 declare
   current_uid uuid := auth.uid();
-  current_email text;
+  current_phone text;
   existing_profile public.users%rowtype;
   new_shop public.shops%rowtype;
   new_profile public.users%rowtype;
@@ -254,18 +256,18 @@ begin
     hashtextextended(current_uid::text, 8147235101)
   );
 
-  select email into current_email
+  select phone into current_phone
     from auth.users
-   where id = current_uid
-     and email_confirmed_at is not null;
-  if current_email is null then
-    raise exception 'Verify your email before creating a shop.';
+   where id = current_uid;
+  if current_phone is null then
+    raise exception 'A signed-in phone account is required to create a shop.';
   end if;
 
   if length(trim(coalesce(p_shop_name, ''))) not between 2 and 100
      or length(trim(coalesce(p_name, ''))) not between 2 and 100
-     or coalesce(p_username, '') !~ '^[a-z0-9._-]{2,60}$' then
-    raise exception 'Enter a valid shop name, full name, and username.';
+     or coalesce(p_username, '') !~ '^[a-z0-9._-]{2,60}$'
+     or coalesce(p_email, '') !~ '^[^[:space:]@]+@[^[:space:]@]+\.[^[:space:]@]+$' then
+    raise exception 'Enter a valid shop name, full name, username, and contact email.';
   end if;
 
   select * into existing_profile from public.users where id = current_uid;
@@ -296,7 +298,7 @@ begin
   insert into public.users (id, key, tenant_id, name, username, email, phone, role)
   values (
     current_uid, current_uid::text, new_shop.id, trim(p_name),
-    p_username, lower(current_email), coalesce(trim(p_phone), ''), 'admin'
+    p_username, lower(trim(p_email)), current_phone, 'admin'
   )
   returning * into new_profile;
 
@@ -359,34 +361,37 @@ security definer
 set search_path = public, auth
 as $$
 declare
-  admin_email text;
-  staff_email text;
+  admin_phone text;
+  staff_phone text;
   profile_row public.users%rowtype;
 begin
   if auth.role() <> 'service_role' then
     raise exception 'This operation must be performed by the trusted staff service.';
   end if;
 
-  select u.email into admin_email
+  select u.phone into admin_phone
     from public.users p
     join auth.users u on u.id = p.id
    where p.id = p_admin_uid
      and p.tenant_id = p_tenant_id
-     and p.role = 'admin'
-     and u.email_confirmed_at is not null;
-  if admin_email is null then
-    raise exception 'An authenticated shop administrator is required.';
+     and p.role = 'admin';
+  if admin_phone is null then
+    raise exception 'A shop administrator with a phone account is required.';
   end if;
 
-  select email into staff_email from auth.users where id = p_user_id;
-  if staff_email is null or lower(staff_email) <> lower(p_email) then
-    raise exception 'The Supabase Auth account does not match the staff email.';
+  select phone into staff_phone
+    from auth.users
+   where id = p_user_id;
+  if staff_phone is null or staff_phone <> p_phone then
+    raise exception 'The Supabase Auth account does not match the staff phone.';
   end if;
 
   if coalesce(trim(p_name), '') = ''
      or p_username !~ '^[a-z0-9._-]{2,60}$'
+     or coalesce(p_email, '') !~ '^[^[:space:]@]+@[^[:space:]@]+\.[^[:space:]@]+$'
+     or coalesce(p_phone, '') !~ '^\+[1-9][0-9]{7,14}$'
      or p_role not in ('admin', 'cashier') then
-    raise exception 'Enter valid staff details and role.';
+    raise exception 'Enter valid staff details, contact email, phone, and role.';
   end if;
 
   insert into public.users (id, key, tenant_id, name, username, email, phone, role)

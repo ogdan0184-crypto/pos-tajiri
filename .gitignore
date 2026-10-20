@@ -12,7 +12,11 @@ installer-build/
 installer-output/
 installer-final/
 installer-final2/
-downloads/TajiriPOSSetup-1.0.0.exe
+downloads/*
+!downloads/.gitkeep
+!downloads/TajiriPOSSetup-1.0.0.exe
+!downloads/TajiriPOSSetup-1.0.0.exe.part1
+!downloads/TajiriPOSSetup-1.0.0.exe.part2
 .probe.cjs
 .search-test.js
 kj.pdf

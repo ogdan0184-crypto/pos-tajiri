@@ -52,7 +52,6 @@ as $$
 declare
   current_uid uuid := auth.uid();
   current_email text;
-  confirmed_at timestamptz;
   bootstrap_value jsonb;
   current_admin_count integer;
 begin
@@ -62,13 +61,13 @@ begin
 
   perform pg_advisory_xact_lock(8147235101);
 
-  select email, email_confirmed_at
-    into current_email, confirmed_at
+  select email
+    into current_email
     from auth.users
    where id = current_uid;
 
-  if current_email is null or confirmed_at is null then
-    raise exception 'Verify your email before completing administrator setup.';
+  if current_email is null then
+    raise exception 'A signed-in account with an email address is required.';
   end if;
 
   if coalesce(trim(p_name), '') = ''
@@ -153,8 +152,7 @@ begin
     from public.users p
     join auth.users u on u.id = p.id
    where p.id = p_admin_uid
-     and p.role = 'admin'
-     and u.email_confirmed_at is not null;
+     and p.role = 'admin';
 
   if admin_email is null then
     raise exception 'An authenticated administrator is required.';

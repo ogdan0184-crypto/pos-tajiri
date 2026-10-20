@@ -11,7 +11,7 @@
  *   shops      – shop owners, trial metadata, and plan price
  *   shop_state – revision-checked POS data, isolated by tenant
  *
- * Supabase Auth handles email/password, verification, and password reset.
+ * Supabase Auth handles phone/password sign-in and password reset.
  * Persistence (LOCAL vs SESSION) is emulated by storing the session in
  * localStorage or sessionStorage.
  */
@@ -46,6 +46,15 @@
 
   const config = window.TAJIRI_SUPABASE_CONFIG;
 
+  // Deep-link target for Supabase email links/redirects. In the packaged
+  // Electron app there is no http origin, so fall back to the local server.
+  const redirectUrl = () => {
+    if (window.location?.origin && window.location.origin.startsWith("http")) {
+      return `${window.location.origin}${window.location.pathname || "/"}`;
+    }
+    return "http://localhost:3000/";
+  };
+
   // Load supabase-js v2 as a classic script (UMD build exposes window.supabase).
   const script = document.createElement("script");
   script.src =
@@ -74,7 +83,7 @@
     if (code.includes("invalid login credentials"))
       return "The email or password is incorrect.";
     if (code.includes("email not confirmed"))
-      return "Verify your email before signing in.";
+      return "Email confirmation is still enabled in Supabase. Disable it to allow password-only sign-in.";
     if (code.includes("already registered") || code.includes("already exists"))
       return "An account already exists for this email. Sign in or use password reset.";
     if (code.includes("at least 6"))
@@ -154,7 +163,9 @@
       return {
         uid: u.id,
         email: u.email,
+        phone: u.phone,
         emailVerified: Boolean(u.email_confirmed_at || u.confirmed_at),
+        phoneVerified: Boolean(u.phone_confirmed_at),
         displayName: (u.user_metadata && u.user_metadata.display_name) || "",
         async updateProfile(profile) {
           const { error } = await client.auth.updateUser({
@@ -163,8 +174,28 @@
           if (error) throw error;
         },
         async sendEmailVerification() {
-          // Supabase signUp sends the confirmation email as part of account
-          // creation; resending here would create duplicate mail/rate limits.
+          const { error } = await client.auth.resend({
+            type: "signup",
+            email: u.email,
+          });
+          if (error) throw error;
+        },
+        async resendVerificationEmail() {
+          const { error } = await client.auth.resend({
+            type: "signup",
+            email: u.email,
+          });
+          if (error) throw error;
+        },
+        async verifyEmail(code) {
+          const { data: verifyData, error } = await client.auth.verifyOtp({
+            email: u.email,
+            token: String(code || "").trim(),
+            type: "signup",
+          });
+          if (error) throw error;
+          if (verifyData?.session) rememberSession(verifyData.session);
+          return { user: userWrapper(verifyData?.session) };
         },
         async delete() {
           throw new Error("Auth users can only be removed by the trusted server.");
@@ -194,6 +225,89 @@
         }
       },
 
+      async signInWithEmailCode(email, code) {
+        const { data, error } = await client.auth.verifyOtp({
+          email,
+          token: String(code || "").trim(),
+          type: "email",
+        });
+        if (error) {
+          const message = String(error.message || "").toLowerCase();
+          if (
+            message.includes("expired") ||
+            message.includes("invalid") ||
+            message.includes("token")
+          ) {
+            error.code = "auth/invalid-verification-code";
+          } else if (message.includes("too many requests")) {
+            error.code = "auth/too-many-requests";
+          } else if (
+            message.includes("network") ||
+            message.includes("failed to fetch")
+          ) {
+            error.code = "auth/network-request-failed";
+          }
+          throw error;
+        }
+        if (data?.session) rememberSession(data.session);
+        return { user: userWrapper(data?.session) };
+      },
+
+      async verifyEmailCode(email, code) {
+        const { data, error } = await client.auth.verifyOtp({
+          email,
+          token: String(code || "").trim(),
+          type: "signup",
+        });
+        if (error) {
+          const message = String(error.message || "").toLowerCase();
+          if (
+            message.includes("expired") ||
+            message.includes("invalid") ||
+            message.includes("token")
+          ) {
+            error.code = "auth/invalid-verification-code";
+          } else if (message.includes("too many requests")) {
+            error.code = "auth/too-many-requests";
+          } else if (
+            message.includes("network") ||
+            message.includes("failed to fetch")
+          ) {
+            error.code = "auth/network-request-failed";
+          }
+          throw error;
+        }
+        if (data?.session) rememberSession(data.session);
+        return { user: userWrapper(data?.session) };
+      },
+
+      async resendVerificationEmail(email) {
+        const { error } = await client.auth.resend({
+          type: "signup",
+          email,
+        });
+        if (error) {
+          const message = String(error.message || "").toLowerCase();
+          if (message.includes("too many requests") || message.includes("rate limit")) {
+            error.code = "auth/too-many-requests";
+          } else if (
+            message.includes("network") ||
+            message.includes("failed to fetch")
+          ) {
+            error.code = "auth/network-request-failed";
+          }
+          throw error;
+        }
+      },
+
+      async sendSignInCode(email) {
+        const { error } = await client.auth.signInWithOtp({
+          email,
+          options: { emailRedirectTo: redirectUrl() },
+        });
+        if (error) throw error;
+      },
+
       async signInWithEmailAndPassword(email, password) {
         const { data, error } = await client.auth.signInWithPassword({
           email,
@@ -219,11 +333,141 @@
         return { user: userWrapper(data.session) };
       },
 
+      async signInWithPhoneAndPassword(phone, password) {
+        const { data, error } = await client.auth.signInWithPassword({
+          phone,
+          password,
+        });
+        if (error) {
+          const message = String(error.message || "").toLowerCase();
+          if (message.includes("phone not confirmed")) {
+            error.code = "auth/phone-not-confirmed";
+          } else if (message.includes("too many requests")) {
+            error.code = "auth/too-many-requests";
+          } else if (message.includes("network") || message.includes("failed to fetch")) {
+            error.code = "auth/network-request-failed";
+          } else {
+            error.code = "auth/invalid-credential";
+          }
+          throw error;
+        }
+        rememberSession(data.session);
+        return { user: userWrapper(data.session) };
+      },
+
+      async createUserWithPhoneAndPassword(phone, password, metadata = {}) {
+        const { data, error } = await client.auth.signUp({
+          phone,
+          password,
+          options: { data: metadata },
+        });
+        if (error) {
+          const message = String(error.message || "").toLowerCase();
+          const code = String(error.code || "").toLowerCase();
+          if (message.includes("already registered") || message.includes("already exists")) {
+            error.code = "auth/phone-already-in-use";
+          } else if (
+            code === "phone_provider_disabled" ||
+            message.includes("phone signups are disabled") ||
+            message.includes("unsupported provider: phone")
+          ) {
+            error.code = "auth/phone-signup-disabled";
+          } else if (message.includes("rate limit") || message.includes("too many requests")) {
+            error.code = "auth/too-many-requests";
+          } else if (message.includes("phone") && message.includes("invalid")) {
+            error.code = "auth/invalid-phone-number";
+          } else if (
+            message.includes("sms") ||
+            message.includes("phone provider") ||
+            message.includes("not configured")
+          ) {
+            error.code = "auth/sms-provider-not-configured";
+          }
+          throw error;
+        }
+        if (!data?.user?.id) {
+          throw new Error("Supabase did not create the phone account.");
+        }
+        if (data.session && !data.user.phone_confirmed_at) {
+          const { error: signOutError } = await client.auth.signOut();
+          if (signOutError) throw signOutError;
+          const confirmationError = new Error(
+            "Supabase phone confirmation is disabled.",
+          );
+          confirmationError.code = "auth/phone-confirmation-disabled";
+          throw confirmationError;
+        }
+        return {
+          user: {
+            uid: data.user.id,
+            phone,
+            phoneVerified: Boolean(data.user.phone_confirmed_at),
+            displayName: metadata.display_name || "",
+          },
+        };
+      },
+
+      async verifyPhoneCode(phone, code) {
+        const { data, error } = await client.auth.verifyOtp({
+          phone,
+          token: String(code || "").trim(),
+          type: "sms",
+        });
+        if (error) {
+          const message = String(error.message || "").toLowerCase();
+          if (message.includes("expired") || message.includes("invalid") || message.includes("token")) {
+            error.code = "auth/invalid-verification-code";
+          } else if (message.includes("too many requests")) {
+            error.code = "auth/too-many-requests";
+          }
+          throw error;
+        }
+        if (data?.session) rememberSession(data.session);
+        return { user: userWrapper(data?.session) };
+      },
+
+      async resendPhoneVerificationCode(phone) {
+        const { error } = await client.auth.resend({ type: "sms", phone });
+        if (error) {
+          const message = String(error.message || "").toLowerCase();
+          if (message.includes("too many requests") || message.includes("rate limit")) {
+            error.code = "auth/too-many-requests";
+          } else if (
+            message.includes("sms") ||
+            message.includes("phone provider") ||
+            message.includes("not configured")
+          ) {
+            error.code = "auth/sms-provider-not-configured";
+          }
+          throw error;
+        }
+      },
+
+      async sendPhonePasswordResetCode(phone) {
+        const { error } = await client.auth.signInWithOtp({
+          phone,
+          options: { shouldCreateUser: false },
+        });
+        if (error) throw error;
+      },
+
+      async verifyPhonePasswordResetCode(phone, code, password) {
+        const { data, error } = await client.auth.verifyOtp({
+          phone,
+          token: String(code || "").trim(),
+          type: "sms",
+        });
+        if (error) throw error;
+        if (data?.session) rememberSession(data.session);
+        const { error: updateError } = await client.auth.updateUser({ password });
+        if (updateError) throw updateError;
+      },
+
       async createUserWithEmailAndPassword(email, password, metadata = {}) {
         const { data, error } = await client.auth.signUp({
           email,
           password,
-          options: { data: metadata },
+          options: { data: metadata, emailRedirectTo: redirectUrl() },
         });
         if (error) {
           const message = String(error.message || "").toLowerCase();
@@ -269,7 +513,25 @@
             emailVerified: false,
             async updateProfile() {},
             async sendEmailVerification() {
-              // Supabase signUp already sent the confirmation message.
+              // Supabase already sent the confirmation code at signUp; resending
+              // immediately can trip rate limits, so this stays a no-op here.
+            },
+            async resendVerificationEmail() {
+              const { error } = await client.auth.resend({
+                type: "signup",
+                email,
+              });
+              if (error) throw error;
+            },
+            async verifyEmail(code) {
+              const { data: verifyData, error } = await client.auth.verifyOtp({
+                email,
+                token: String(code || "").trim(),
+                type: "signup",
+              });
+              if (error) throw error;
+              if (verifyData?.session) rememberSession(verifyData.session);
+              return { user: userWrapper(verifyData?.session) };
             },
             async delete() {
               throw new Error("Auth users can only be removed by the trusted server.");
@@ -478,7 +740,7 @@
             p_shop_name: profile.shopName,
             p_name: profile.name,
             p_username: profile.username,
-            p_phone: profile.phone || "",
+            p_email: profile.email,
           },
         );
         if (error) throw error;
@@ -531,8 +793,8 @@
             }
           }
           const staffError = new Error(message);
-          if (/already has an account/i.test(message)) {
-            staffError.code = "auth/email-already-in-use";
+          if (/phone number already has an account/i.test(message)) {
+            staffError.code = "auth/phone-already-in-use";
           }
           throw staffError;
         }
